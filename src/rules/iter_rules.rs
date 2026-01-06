@@ -1,3 +1,4 @@
+use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
@@ -27,6 +28,7 @@ impl Rule for CollectThenIterateRule {
         let mut visitor = CollectThenIterateVisitor {
             ctx,
             diagnostics: Vec::new(),
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -36,9 +38,17 @@ impl Rule for CollectThenIterateRule {
 struct CollectThenIterateVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
+    state: VisitorState,
 }
 
 impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method_name = node.method.to_string();
 

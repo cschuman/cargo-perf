@@ -156,8 +156,13 @@ impl<'ast> Visit<'ast> for SuppressionExtractor {
 
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         let start = node.struct_token.span.start().line;
-        let end = node.ident.span().end().line; // Approximation
-        self.add_item_suppressions(&node.attrs, start, end + 10); // Extend a bit for fields
+        // Get accurate end line based on struct variant
+        let end = match &node.fields {
+            syn::Fields::Named(fields) => fields.brace_token.span.close().start().line,
+            syn::Fields::Unnamed(fields) => fields.paren_token.span.close().start().line,
+            syn::Fields::Unit => node.semi_token.map(|t| t.span.start().line).unwrap_or(start),
+        };
+        self.add_item_suppressions(&node.attrs, start, end);
         syn::visit::visit_item_struct(self, node);
     }
 
@@ -169,12 +174,9 @@ impl<'ast> Visit<'ast> for SuppressionExtractor {
     }
 
     fn visit_item_mod(&mut self, node: &'ast ItemMod) {
-        if let Some((_, items)) = &node.content {
+        if let Some((brace, _)) = &node.content {
             let start = node.mod_token.span.start().line;
-            // Approximate end line
-            let end = items.last()
-                .map(|_| start + 1000) // Large range for inline modules
-                .unwrap_or(start);
+            let end = brace.span.close().start().line;
             self.add_item_suppressions(&node.attrs, start, end);
         }
         syn::visit::visit_item_mod(self, node);

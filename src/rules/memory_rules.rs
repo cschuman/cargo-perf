@@ -1,3 +1,4 @@
+use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
@@ -27,7 +28,7 @@ impl Rule for CloneInLoopRule {
         let mut visitor = CloneInLoopVisitor {
             ctx,
             diagnostics: Vec::new(),
-            loop_depth: 0,
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -37,30 +38,40 @@ impl Rule for CloneInLoopRule {
 struct CloneInLoopVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
-    loop_depth: usize,
+    state: VisitorState,
 }
 
 impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if self.loop_depth > 0 && node.method == "clone" {
+        if self.state.in_loop() && node.method == "clone" {
             let span = node.method.span();
             let line = span.start().line;
             let column = span.start().column;
@@ -106,7 +117,7 @@ impl Rule for RegexInLoopRule {
         let mut visitor = RegexInLoopVisitor {
             ctx,
             diagnostics: Vec::new(),
-            loop_depth: 0,
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -116,30 +127,40 @@ impl Rule for RegexInLoopRule {
 struct RegexInLoopVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
-    loop_depth: usize,
+    state: VisitorState,
 }
 
 impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if self.loop_depth > 0 {
+        if self.state.in_loop() {
             if let Expr::Path(ExprPath { path, .. }) = &*node.func {
                 let path_str = path
                     .segments

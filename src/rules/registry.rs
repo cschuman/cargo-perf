@@ -7,6 +7,7 @@ use super::allocation_rules::{
 };
 use super::async_rules::AsyncBlockInAsyncRule;
 use super::iter_rules::CollectThenIterateRule;
+use super::lock_across_await::LockAcrossAwaitRule;
 use super::memory_rules::{CloneInLoopRule, RegexInLoopRule};
 use super::Rule;
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ static RULES: LazyLock<Vec<Box<dyn Rule>>> = LazyLock::new(|| {
     vec![
         // Async rules
         Box::new(AsyncBlockInAsyncRule),
+        Box::new(LockAcrossAwaitRule),
         // Memory rules
         Box::new(CloneInLoopRule),
         Box::new(RegexInLoopRule),
@@ -101,6 +103,7 @@ mod tests {
     fn test_rule_ids() {
         let ids: Vec<_> = rule_ids().collect();
         assert!(ids.contains(&"async-block-in-async"));
+        assert!(ids.contains(&"lock-across-await"));
         assert!(ids.contains(&"clone-in-hot-loop"));
         assert!(ids.contains(&"regex-in-loop"));
         assert!(ids.contains(&"collect-then-iterate"));

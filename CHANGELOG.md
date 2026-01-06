@@ -2,6 +2,26 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.3.0] - 2025-01-05
+
+### Added
+- New critical rule `lock-across-await`: Detects MutexGuard/RwLockGuard held across `.await` points (causes deadlocks)
+- CI/CD pipeline (`.github/workflows/ci.yml`) with tests, clippy, fmt, MSRV check, dogfooding, and security audit
+- `CONTRIBUTING.md` with guidelines for adding new rules
+- Shared `VisitorState` for consistent loop tracking and recursion limits
+
+### Security
+- **TOCTOU fix**: File operations now use file descriptors to prevent race conditions
+- **Recursion depth limits**: All AST visitors now bail out at depth 256 to prevent stack overflow
+
+### Fixed
+- Suppression span calculation for structs and modules (removed +10/+1000 hacks)
+
+### Changed
+- Total rules: 9 (up from 8)
+- Total tests: 69 (up from 59)
+- README rewritten to honestly position as async-focused complement to clippy
+
 ## [0.2.0] - 2025-01-05
 
 ### Added

@@ -1,3 +1,4 @@
+use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
@@ -28,6 +29,7 @@ impl Rule for AsyncBlockInAsyncRule {
             ctx,
             diagnostics: Vec::new(),
             in_async_fn: false,
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -38,6 +40,7 @@ struct AsyncBlockingVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     in_async_fn: bool,
+    state: VisitorState,
 }
 
 /// Known blocking calls that should be avoided in async contexts
@@ -122,10 +125,20 @@ impl AsyncBlockingVisitor<'_> {
 
 impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
         let was_async = self.in_async_fn;
         self.in_async_fn = node.sig.asyncness.is_some();
         syn::visit::visit_item_fn(self, node);
         self.in_async_fn = was_async;
+        self.state.exit_expr();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {

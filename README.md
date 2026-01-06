@@ -1,6 +1,15 @@
 # cargo-perf
 
-Preventive performance analysis for Rust. Catch performance anti-patterns before they reach production.
+Static analysis for async Rust performance anti-patterns. Complements `clippy` with checks specific to async code and common loop-related performance issues.
+
+## What This Tool Does
+
+cargo-perf catches performance issues that clippy doesn't:
+- **Async-specific**: Blocking calls in async functions, lock guards held across await points
+- **Loop patterns**: Allocations inside loops (clone, format!, regex compilation)
+- **Common mistakes**: collect-then-iterate, missing Vec capacity hints
+
+This is **not** a replacement for clippy - use both together.
 
 ## Installation
 
@@ -8,7 +17,7 @@ Preventive performance analysis for Rust. Catch performance anti-patterns before
 cargo install --path .
 ```
 
-## Usage
+## Quick Start
 
 ```bash
 # Analyze current directory
@@ -17,94 +26,77 @@ cargo perf
 # Analyze specific path
 cargo perf check src/
 
-# Output as JSON
+# JSON output for CI
 cargo perf --format json
 
-# Output as SARIF (for GitHub integration)
+# SARIF output for GitHub code scanning
 cargo perf --format sarif
-
-# List available rules
-cargo perf rules
-
-# Initialize config file
-cargo perf init
 ```
 
-## Rules
+## Rules (9 total)
 
-| Rule | Severity | Description |
-|------|----------|-------------|
-| `async-block-in-async` | Error | Detects blocking std calls inside async functions |
-| `clone-in-hot-loop` | Warning | Detects `.clone()` calls on heap types inside loops |
-| `regex-in-loop` | Warning | Detects `Regex::new()` inside loops |
-| `collect-then-iterate` | Warning | Detects `.collect()` immediately followed by `.iter()` |
-| `vec-no-capacity` | Warning | Detects `Vec::new()` + push in loop without `with_capacity` |
-| `format-in-loop` | Warning | Detects `format!()` allocations inside loops |
-| `string-concat-loop` | Warning | Detects String `+` operator in loops |
-| `mutex-in-loop` | Warning | Detects `Mutex::lock()` inside loops |
+### Async Rules (Errors)
+
+| Rule | Description |
+|------|-------------|
+| `async-block-in-async` | Blocking std calls (fs, thread::sleep) in async functions |
+| `lock-across-await` | MutexGuard/RwLockGuard held across `.await` - causes deadlocks |
+
+### Loop Rules (Warnings)
+
+| Rule | Description |
+|------|-------------|
+| `clone-in-hot-loop` | `.clone()` on heap types inside loops |
+| `regex-in-loop` | `Regex::new()` inside loops - compile once outside |
+| `format-in-loop` | `format!()` inside loops - allocates each iteration |
+| `string-concat-loop` | String `+` operator in loops - use `push_str()` |
+| `vec-no-capacity` | `Vec::new()` + push in loop - use `with_capacity()` |
+| `mutex-in-loop` | `Mutex::lock()` inside loops - acquire once outside |
+
+### Iterator Rules (Warnings)
+
+| Rule | Description |
+|------|-------------|
+| `collect-then-iterate` | `.collect().iter()` - remove intermediate allocation |
 
 ## Suppressing Warnings
 
-### Attribute-based suppression
+### Attribute-based
 
 ```rust
 #[allow(cargo_perf::clone_in_hot_loop)]
 fn my_function() {
-    // clone warnings suppressed in this function
+    // clone warnings suppressed here
 }
 ```
 
-### Comment-based suppression
+### Comment-based
 
 ```rust
 // cargo-perf-ignore: clone-in-hot-loop
-let x = data.clone(); // this line is suppressed
+let x = data.clone(); // this line suppressed
 
 // cargo-perf-ignore
-let y = data.clone(); // all rules suppressed on this line
+let y = data.clone(); // all rules suppressed
 ```
 
 ## Configuration
 
-Create `cargo-perf.toml` in your project root:
+Create `cargo-perf.toml`:
 
 ```toml
 [rules]
-# Set rule severity: "deny" (error), "warn" (warning), "allow" (ignore)
-async-block-in-async = "deny"
-clone-in-hot-loop = "warn"
-regex-in-loop = "allow"
+async-block-in-async = "deny"   # error
+clone-in-hot-loop = "warn"      # warning
+regex-in-loop = "allow"         # ignore
 
 [output]
-format = "console"  # "console", "json", "sarif"
-color = "auto"      # "auto", "always", "never"
+format = "console"  # console, json, sarif
 ```
-
-## Dog-fooding Results
-
-cargo-perf is tested on itself. During development, it detected a real issue in its own codebase:
-
-```
-$ cargo-perf check src/
-warning: `.clone()` called inside loop; consider borrowing or moving the clone outside [clone-in-hot-loop]
-  --> src/reporter/sarif.rs:101:40
-  help: Use a reference or move the clone outside the loop
-
-Found 1 warning(s)
-```
-
-The warning identified a `.clone()` call inside a loop in the SARIF reporter. This was refactored to collect data outside the loop, eliminating the unnecessary allocations. After the fix:
-
-```
-$ cargo-perf check src/
-No performance issues found.
-```
-
-This demonstrates that cargo-perf catches real performance issues, even in well-reviewed code.
 
 ## CI Integration
 
-### GitHub Actions with SARIF
+### GitHub Actions
 
 ```yaml
 - name: Run cargo-perf
@@ -123,6 +115,21 @@ This demonstrates that cargo-perf catches real performance issues, even in well-
 ```bash
 cargo perf --fail-on warning
 ```
+
+## Comparison with Clippy
+
+| Category | clippy | cargo-perf |
+|----------|--------|------------|
+| General perf lints | Many (~50+) | Few (9) |
+| Async-specific | Limited | Focus area |
+| Lock-across-await | No | Yes |
+| Loop allocations | Some | Comprehensive |
+
+**Use both**: `cargo clippy && cargo perf`
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on adding rules.
 
 ## License
 

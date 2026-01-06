@@ -1,5 +1,6 @@
 //! Rules for detecting allocation anti-patterns.
 
+use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
@@ -30,7 +31,7 @@ impl Rule for VecNoCapacityRule {
             ctx,
             diagnostics: Vec::new(),
             vec_vars: std::collections::HashSet::new(),
-            loop_depth: 0,
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -41,7 +42,7 @@ struct VecNoCapacityVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     vec_vars: std::collections::HashSet<String>,
-    loop_depth: usize,
+    state: VisitorState,
 }
 
 impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
@@ -58,25 +59,35 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if self.loop_depth > 0 && node.method == "push" {
+        if self.state.in_loop() && node.method == "push" {
             // Check if receiver is a tracked Vec variable
             if let Expr::Path(ExprPath { path, .. }) = &*node.receiver {
                 if let Some(ident) = path.get_ident() {
@@ -156,7 +167,7 @@ impl Rule for FormatInLoopRule {
         let mut visitor = FormatInLoopVisitor {
             ctx,
             diagnostics: Vec::new(),
-            loop_depth: 0,
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -166,30 +177,40 @@ impl Rule for FormatInLoopRule {
 struct FormatInLoopVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
-    loop_depth: usize,
+    state: VisitorState,
 }
 
 impl<'ast> Visit<'ast> for FormatInLoopVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if self.loop_depth > 0 {
+        if self.state.in_loop() {
             let macro_name = node
                 .path
                 .segments
@@ -246,7 +267,7 @@ impl Rule for StringConcatLoopRule {
         let mut visitor = StringConcatVisitor {
             ctx,
             diagnostics: Vec::new(),
-            loop_depth: 0,
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -256,30 +277,40 @@ impl Rule for StringConcatLoopRule {
 struct StringConcatVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
-    loop_depth: usize,
+    state: VisitorState,
 }
 
 impl<'ast> Visit<'ast> for StringConcatVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
     }
 
     fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
-        if self.loop_depth > 0 {
+        if self.state.in_loop() {
             // Check for + or += with strings
             match &node.op {
                 syn::BinOp::Add(_) | syn::BinOp::AddAssign(_) => {
@@ -359,7 +390,7 @@ impl Rule for MutexLockInLoopRule {
         let mut visitor = MutexLockVisitor {
             ctx,
             diagnostics: Vec::new(),
-            loop_depth: 0,
+            state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -369,30 +400,40 @@ impl Rule for MutexLockInLoopRule {
 struct MutexLockVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
-    loop_depth: usize,
+    state: VisitorState,
 }
 
 impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.loop_depth += 1;
+        if self.state.should_bail() { return; }
+        self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
-        self.loop_depth -= 1;
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() { return; }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if self.loop_depth > 0 {
+        if self.state.in_loop() {
             let method = node.method.to_string();
             if method == "lock" || method == "try_lock" || method == "read" || method == "write" {
                 let span = node.method.span();
