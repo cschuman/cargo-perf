@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::Severity;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub rules: HashMap<String, RuleSeverity>,
@@ -54,16 +54,6 @@ fn default_color() -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     pub orm: Option<String>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            rules: HashMap::new(),
-            output: OutputConfig::default(),
-            database: DatabaseConfig::default(),
-        }
-    }
 }
 
 impl Config {

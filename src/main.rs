@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cargo_perf::{analyze, Config};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -104,7 +104,7 @@ fn run() -> Result<()> {
 }
 
 fn run_check(
-    path: &PathBuf,
+    path: &Path,
     config: &Config,
     format: OutputFormat,
     min_severity: cargo_perf::Severity,
@@ -145,14 +145,14 @@ fn run_check(
     Ok(())
 }
 
-fn run_fix(path: &PathBuf, config: &Config) -> Result<()> {
+fn run_fix(path: &Path, config: &Config) -> Result<()> {
     let diagnostics = analyze(path, config)?;
     let fixed = cargo_perf::fix::apply_fixes(&diagnostics, path)?;
     println!("Applied {} fix(es)", fixed);
     Ok(())
 }
 
-fn run_init(path: &PathBuf) -> Result<()> {
+fn run_init(path: &Path) -> Result<()> {
     let config_path = path.join("cargo-perf.toml");
     if config_path.exists() {
         anyhow::bail!("cargo-perf.toml already exists");

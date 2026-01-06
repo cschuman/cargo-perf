@@ -44,7 +44,7 @@ impl<'a> Engine<'a> {
             let file_path = entry.path();
 
             // Skip non-Rust files
-            if !file_path.extension().map_or(false, |ext| ext == "rs") {
+            if !file_path.extension().is_some_and(|ext| ext == "rs") {
                 continue;
             }
 

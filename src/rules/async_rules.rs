@@ -74,7 +74,7 @@ const BLOCKING_CALLS: &[(&str, &str, &str)] = &[
     ("std::io::Stdin", "read_line", "tokio::io::AsyncBufReadExt::read_line"),
 ];
 
-impl<'a> AsyncBlockingVisitor<'a> {
+impl AsyncBlockingVisitor<'_> {
     fn check_blocking_call(&mut self, full_path: &str, span: proc_macro2::Span) {
         // Find the best (most specific) match
         let mut best_match: Option<(&str, &str)> = None;
