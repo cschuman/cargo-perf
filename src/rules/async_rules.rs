@@ -152,3 +152,100 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         syn::visit::visit_expr_method_call(self, node);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::AnalysisContext;
+    use crate::Config;
+    use std::path::Path;
+
+    fn check_code(source: &str) -> Vec<Diagnostic> {
+        let ast = syn::parse_file(source).expect("Failed to parse test code");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
+        AsyncBlockInAsyncRule.check(&ctx)
+    }
+
+    #[test]
+    fn test_detects_fs_read_in_async() {
+        let source = r#"
+            async fn bad() {
+                let _ = std::fs::read_to_string("file.txt");
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("read_to_string"));
+        assert!(diagnostics[0].message.contains("tokio::fs::read_to_string"));
+    }
+
+    #[test]
+    fn test_detects_thread_sleep_in_async() {
+        let source = r#"
+            async fn bad() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("sleep"));
+        assert!(diagnostics[0].message.contains("tokio::time::sleep"));
+    }
+
+    #[test]
+    fn test_no_detection_in_sync_function() {
+        let source = r#"
+            fn sync_fn() {
+                let _ = std::fs::read_to_string("file.txt");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(diagnostics.is_empty(), "Should not flag blocking calls in sync functions");
+    }
+
+    #[test]
+    fn test_nested_functions_tracked_correctly() {
+        let source = r#"
+            async fn outer() {
+                fn inner_sync() {
+                    // This should NOT be flagged - inner_sync is not async
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                // This SHOULD be flagged - we're back in async context
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        "#;
+        let diagnostics = check_code(source);
+        // Should only detect the one in the outer async fn, not the inner sync fn
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_detects_multiple_blocking_calls() {
+        let source = r#"
+            async fn bad() {
+                let _ = std::fs::read("file1");
+                let _ = std::fs::write("file2", b"data");
+                let _ = std::fs::metadata("file3");
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 3);
+    }
+
+    #[test]
+    fn test_specific_match_over_substring() {
+        // Ensure read_to_string is detected as read_to_string, not just read
+        let source = r#"
+            async fn test() {
+                let _ = std::fs::read_to_string("file.txt");
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+        // Should suggest tokio::fs::read_to_string, not tokio::fs::read
+        assert!(diagnostics[0].suggestion.as_ref().unwrap().contains("read_to_string"));
+    }
+}

@@ -73,3 +73,117 @@ impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
         syn::visit::visit_expr_method_call(self, node);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::AnalysisContext;
+    use crate::Config;
+    use std::path::Path;
+
+    fn check_code(source: &str) -> Vec<Diagnostic> {
+        let ast = syn::parse_file(source).expect("Failed to parse test code");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
+        CollectThenIterateRule.check(&ctx)
+    }
+
+    #[test]
+    fn test_detects_collect_then_iter() {
+        let source = r#"
+            fn test() {
+                let items = vec![1, 2, 3];
+                let _: Vec<_> = items.iter().map(|x| x * 2).collect::<Vec<_>>().iter().map(|x| x + 1).collect();
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("collect"));
+        assert!(diagnostics[0].message.contains("iter"));
+    }
+
+    #[test]
+    fn test_detects_collect_then_into_iter() {
+        let source = r#"
+            fn test() {
+                let items = vec![1, 2, 3];
+                let _: i32 = items.iter().collect::<Vec<_>>().into_iter().sum();
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_detection_for_legitimate_collect() {
+        let source = r#"
+            fn test() {
+                let items = vec![1, 2, 3];
+                let collected: Vec<_> = items.iter().map(|x| x * 2).collect();
+                // Using collected later for something else
+                println!("{:?}", collected);
+                for item in collected.iter() {
+                    println!("{}", item);
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        // No detection because collect and iter are on separate lines/statements
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_no_detection_when_collect_stored() {
+        let source = r#"
+            fn test() -> Vec<i32> {
+                let items = vec![1, 2, 3];
+                items.iter().map(|x| x * 2).collect()
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_detects_in_function_chain() {
+        let source = r#"
+            fn process(data: &[i32]) -> i32 {
+                data.iter()
+                    .filter(|x| **x > 0)
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(|x| **x * 2)
+                    .sum()
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].suggestion.as_ref().unwrap().contains("Remove"));
+    }
+
+    #[test]
+    fn test_detects_multiple_violations() {
+        let source = r#"
+            fn test() {
+                let a: Vec<_> = vec![1, 2].iter().collect::<Vec<_>>().iter().collect();
+                let b: Vec<_> = vec![3, 4].iter().collect::<Vec<_>>().into_iter().collect();
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn test_no_detection_for_other_methods_after_collect() {
+        let source = r#"
+            fn test() {
+                let items = vec![1, 2, 3];
+                let len = items.iter().collect::<Vec<_>>().len();
+                let first = items.iter().collect::<Vec<_>>().first();
+            }
+        "#;
+        let diagnostics = check_code(source);
+        // len() and first() are not iter() or into_iter(), so no detection
+        assert!(diagnostics.is_empty());
+    }
+}

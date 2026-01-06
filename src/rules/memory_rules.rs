@@ -172,3 +172,160 @@ impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
         syn::visit::visit_expr_call(self, node);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::AnalysisContext;
+    use crate::Config;
+    use std::path::Path;
+
+    fn check_clone_rule(source: &str) -> Vec<Diagnostic> {
+        let ast = syn::parse_file(source).expect("Failed to parse test code");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
+        CloneInLoopRule.check(&ctx)
+    }
+
+    fn check_regex_rule(source: &str) -> Vec<Diagnostic> {
+        let ast = syn::parse_file(source).expect("Failed to parse test code");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
+        RegexInLoopRule.check(&ctx)
+    }
+
+    // Clone in loop tests
+    #[test]
+    fn test_detects_clone_in_for_loop() {
+        let source = r#"
+            fn test(items: &[String]) {
+                for item in items {
+                    let owned = item.clone();
+                    println!("{}", owned);
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("clone"));
+    }
+
+    #[test]
+    fn test_detects_clone_in_while_loop() {
+        let source = r#"
+            fn test(data: &String) {
+                let mut i = 0;
+                while i < 10 {
+                    let copy = data.clone();
+                    i += 1;
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_detects_clone_in_loop_loop() {
+        let source = r#"
+            fn test(data: &String) {
+                loop {
+                    let copy = data.clone();
+                    break;
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_detects_clone_in_nested_loops() {
+        let source = r#"
+            fn test(matrix: &[Vec<String>]) {
+                for row in matrix {
+                    for cell in row {
+                        let copy = cell.clone();
+                    }
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_detection_clone_outside_loop() {
+        let source = r#"
+            fn test(data: &String) {
+                let copy = data.clone();  // Outside loop - OK
+                for i in 0..10 {
+                    println!("{}", copy);
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    // Regex in loop tests
+    #[test]
+    fn test_detects_regex_new_in_for_loop() {
+        let source = r#"
+            fn test(inputs: &[&str]) {
+                for input in inputs {
+                    let re = regex::Regex::new(r"\d+").unwrap();
+                    if re.is_match(input) {}
+                }
+            }
+        "#;
+        let diagnostics = check_regex_rule(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("Regex::new"));
+    }
+
+    #[test]
+    fn test_detects_regex_new_in_while_loop() {
+        let source = r#"
+            fn test() {
+                let mut i = 0;
+                while i < 10 {
+                    let re = Regex::new(r"test").unwrap();
+                    i += 1;
+                }
+            }
+        "#;
+        let diagnostics = check_regex_rule(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_detection_regex_outside_loop() {
+        let source = r#"
+            fn test(inputs: &[&str]) {
+                let re = regex::Regex::new(r"\d+").unwrap();  // Outside loop - OK
+                for input in inputs {
+                    if re.is_match(input) {}
+                }
+            }
+        "#;
+        let diagnostics = check_regex_rule(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_loop_depth_resets_after_loop() {
+        let source = r#"
+            fn test() {
+                for i in 0..10 {
+                    // Inside loop
+                }
+                // Outside loop - clone should be OK
+                let s = String::from("test");
+                let copy = s.clone();
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert!(diagnostics.is_empty());
+    }
+}
