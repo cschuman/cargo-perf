@@ -99,6 +99,8 @@ impl<'a> Engine<'a> {
                         );
                         continue;
                     }
+                    // Justification: WalkDir is a lazy iterator with unknown length
+                    // cargo-perf-ignore: vec-no-capacity
                     files.push(file_path.to_path_buf());
                 }
                 Ok(_) => {
@@ -179,6 +181,8 @@ impl<'a> Engine<'a> {
             // Filter out suppressed diagnostics
             for diag in rule_diagnostics {
                 if !suppressions.is_suppressed(diag.rule_id, diag.line) {
+                    // Justification: Diagnostic count varies per file, can't predict capacity
+                    // cargo-perf-ignore: vec-no-capacity
                     diagnostics.push(diag);
                 }
             }

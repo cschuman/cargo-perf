@@ -2,6 +2,28 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.4.0] - 2025-01-05
+
+### Added
+- **`--strict` mode**: Only runs high-confidence rules (`async-block-in-async`, `lock-across-await`) - recommended for CI
+- **Benchmarks**: Real performance measurements for all anti-patterns (see `benchmarks/`)
+- Auto-fix infrastructure for `collect-then-iterate` and `string-concat-loop` rules (internal, not exposed)
+
+### Fixed
+- **False positive fix**: `string-concat-loop` no longer flags integer arithmetic (`i + 1`, `sum += 1`)
+- Improved `is_likely_string_expr` heuristic to require clear string evidence
+
+### Changed
+- **Removed `fix` subcommand** from CLI (will return when more rules support auto-fix)
+- README completely rewritten with strong clippy positioning and real benchmark data
+- Total tests: 74 unit + 10 integration (up from 69)
+
+### Documentation
+- Clear "Why Not Just Use Clippy?" section
+- CI integration examples (GitHub Actions, SARIF)
+- Suppression syntax documentation
+- Benchmark methodology and results
+
 ## [0.3.0] - 2025-01-05
 
 ### Added

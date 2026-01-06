@@ -1,8 +1,9 @@
 //! Rules for detecting allocation anti-patterns.
 
 use super::visitor::VisitorState;
-use super::{Diagnostic, Rule, Severity};
+use super::{Diagnostic, Fix, Replacement, Rule, Severity};
 use crate::engine::AnalysisContext;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Expr, ExprCall, ExprMethodCall, ExprPath};
 
@@ -324,6 +325,9 @@ impl<'ast> Visit<'ast> for StringConcatVisitor<'_> {
                         let line = span.start().line;
                         let column = span.start().column;
 
+                        // Try to generate fix for += case
+                        let fix = self.generate_string_concat_fix(node);
+
                         self.diagnostics.push(Diagnostic {
                             rule_id: "string-concat-loop",
                             severity: Severity::Warning,
@@ -334,7 +338,7 @@ impl<'ast> Visit<'ast> for StringConcatVisitor<'_> {
                             end_line: None,
                             end_column: None,
                             suggestion: Some("Use `String::push_str()` or `write!()` to a buffer instead".to_string()),
-                            fix: None,
+                            fix,
                         });
                     }
                 }
@@ -345,25 +349,107 @@ impl<'ast> Visit<'ast> for StringConcatVisitor<'_> {
     }
 }
 
-/// Heuristic to detect if an expression is likely a String
-fn is_likely_string_expr(expr: &Expr) -> bool {
+impl StringConcatVisitor<'_> {
+    /// Generate a fix for string concatenation patterns.
+    ///
+    /// For `s += expr`, generates `s.push_str(expr)`
+    fn generate_string_concat_fix(&self, node: &syn::ExprBinary) -> Option<Fix> {
+        // Only handle += for now (AddAssign)
+        // The + case (Add) is trickier because it's usually part of an assignment
+        if !matches!(&node.op, syn::BinOp::AddAssign(_)) {
+            return None;
+        }
+
+        // Get the variable name from left side
+        let var_name = match &*node.left {
+            Expr::Path(path) => path.path.get_ident()?.to_string(),
+            _ => return None,
+        };
+
+        // Get the right-hand expression as source text
+        let rhs_span = node.right.span();
+        let (rhs_start, rhs_end) = self.ctx.span_to_byte_range(rhs_span)?;
+        let rhs_text = self.ctx.source.get(rhs_start..rhs_end)?;
+
+        // Get the full expression span for replacement
+        let full_span = node.span();
+        let (start, end) = self.ctx.span_to_byte_range(full_span)?;
+
+        // Generate the replacement: var.push_str(rhs)
+        let new_text = format!("{}.push_str({})", var_name, rhs_text);
+
+        Some(Fix {
+            description: format!("Replace `{} += ...` with `{}.push_str(...)`", var_name, var_name),
+            replacements: vec![Replacement {
+                file_path: self.ctx.file_path.to_path_buf(),
+                start_byte: start,
+                end_byte: end,
+                new_text,
+            }],
+        })
+    }
+}
+
+/// Check if an expression is definitely NOT a string (e.g., integer/float literals)
+fn is_definitely_numeric(expr: &Expr) -> bool {
     match expr {
+        Expr::Lit(lit) => matches!(&lit.lit,
+            syn::Lit::Int(_) | syn::Lit::Float(_) | syn::Lit::Byte(_) | syn::Lit::Bool(_) | syn::Lit::Char(_)
+        ),
+        Expr::Reference(r) => is_definitely_numeric(&r.expr),
+        Expr::Paren(p) => is_definitely_numeric(&p.expr),
+        Expr::Unary(u) => is_definitely_numeric(&u.expr), // -1, !x etc
+        _ => false,
+    }
+}
+
+/// Check if an expression is definitely a string operation
+fn is_definitely_string(expr: &Expr) -> bool {
+    match expr {
+        // High confidence: string literals
         Expr::Lit(lit) => matches!(&lit.lit, syn::Lit::Str(_)),
+
+        // High confidence: methods that produce strings
         Expr::MethodCall(call) => {
             let method = call.method.to_string();
-            matches!(method.as_str(), "to_string" | "to_owned" | "into" | "format")
+            matches!(method.as_str(), "to_string" | "to_owned" | "format")
         }
+
+        // High confidence: format! macro
         Expr::Macro(m) => {
             m.mac.path.segments.last()
                 .map(|s| s.ident == "format")
                 .unwrap_or(false)
         }
-        Expr::Path(path) => {
-            // Could be a String variable - we'll flag conservatively
-            path.path.get_ident().is_some()
+
+        // Check references
+        Expr::Reference(r) => is_definitely_string(&r.expr),
+
+        // For binary expressions like `s + "text"`, check recursively
+        Expr::Binary(bin) => {
+            matches!(&bin.op, syn::BinOp::Add(_)) &&
+            (is_definitely_string(&bin.left) || is_definitely_string(&bin.right))
         }
+
         _ => false,
     }
+}
+
+/// Heuristic to detect if an expression is likely a String concatenation.
+///
+/// Returns true if:
+/// - Either side is definitely a string (string literal, .to_string(), format!)
+/// - AND neither side is definitely numeric (integer literal, etc.)
+///
+/// This avoids false positives on `i + 1` while catching `s + "text"` and `s + word.to_string()`
+fn is_likely_string_expr(expr: &Expr) -> bool {
+    // Never flag if expression is numeric
+    if is_definitely_numeric(expr) {
+        return false;
+    }
+
+    // Flag if expression is definitely a string
+    is_definitely_string(expr)
 }
 
 /// Detects Mutex lock acquired inside loops
@@ -570,12 +656,12 @@ mod tests {
 
     // String concat tests
     #[test]
-    fn test_string_plus_in_loop() {
+    fn test_string_plus_in_loop_with_literal() {
         let source = r#"
             fn test() {
                 let mut s = String::new();
-                for word in &["a", "b", "c"] {
-                    s = s + word;
+                for _ in 0..10 {
+                    s = s + "text";
                 }
             }
         "#;
@@ -585,17 +671,81 @@ mod tests {
     }
 
     #[test]
-    fn test_string_plus_assign_in_loop() {
+    fn test_string_plus_with_to_string() {
         let source = r#"
             fn test() {
                 let mut s = String::new();
-                for word in &["a", "b", "c"] {
-                    s += word;
+                for i in 0..10 {
+                    s = s + &i.to_string();
                 }
             }
         "#;
         let diagnostics = check_string_concat(source);
         assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_false_positive_integer_plus() {
+        // This should NOT be flagged as string concat
+        let source = r#"
+            fn test() {
+                let mut sum = 0;
+                for i in 0..10 {
+                    sum += i;
+                    let x = sum + 1;
+                }
+            }
+        "#;
+        let diagnostics = check_string_concat(source);
+        assert!(diagnostics.is_empty(), "Should not flag integer operations");
+    }
+
+    #[test]
+    fn test_no_false_positive_index_arithmetic() {
+        // This should NOT be flagged - common pattern in parsers
+        let source = r#"
+            fn test(s: &str) {
+                for (idx, _) in s.char_indices() {
+                    let next = idx + 1;
+                    let prev = idx - 1;
+                }
+            }
+        "#;
+        let diagnostics = check_string_concat(source);
+        assert!(diagnostics.is_empty(), "Should not flag index arithmetic");
+    }
+
+    #[test]
+    fn test_string_concat_fix_plus_assign() {
+        // Test fix for s += "text" pattern
+        let source = r#"fn test() {
+    let mut s = String::new();
+    for _ in 0..3 {
+        s += "x";
+    }
+}"#;
+        let diagnostics = check_string_concat(source);
+        assert_eq!(diagnostics.len(), 1);
+
+        // Check that fix is generated for += case
+        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix for +=");
+        assert_eq!(fix.replacements.len(), 1);
+
+        // Apply fix and verify
+        let replacement = &fix.replacements[0];
+        let mut result = source.to_string();
+        result.replace_range(replacement.start_byte..replacement.end_byte, &replacement.new_text);
+
+        assert!(
+            result.contains("s.push_str(\"x\")"),
+            "Fix should convert to push_str: {}",
+            result
+        );
+        assert!(
+            !result.contains("s +="),
+            "Fix should remove +=: {}",
+            result
+        );
     }
 
     // Mutex tests

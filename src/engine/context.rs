@@ -61,6 +61,16 @@ impl LineIndex {
     pub fn line_count(&self) -> usize {
         self.line_starts.len()
     }
+
+    /// Convert (line, column) to byte offset. Both are 1-indexed.
+    ///
+    /// Returns None if line is out of bounds.
+    /// Column is clamped to line length if too large.
+    pub fn byte_offset(&self, line: usize, column: usize) -> Option<usize> {
+        let line_start = self.line_start(line)?;
+        // Column is 1-indexed, so subtract 1
+        Some(line_start + column.saturating_sub(1))
+    }
 }
 
 /// Context passed to rules during analysis.
@@ -107,6 +117,19 @@ impl<'a> AnalysisContext<'a> {
     /// Get a reference to the line index for advanced lookups.
     pub fn line_index(&self) -> &LineIndex {
         &self.line_index
+    }
+
+    /// Convert a proc_macro2 span to byte range (start, end).
+    ///
+    /// Returns None if the span positions are invalid.
+    pub fn span_to_byte_range(&self, span: proc_macro2::Span) -> Option<(usize, usize)> {
+        let start = span.start();
+        let end = span.end();
+
+        let start_byte = self.line_index.byte_offset(start.line, start.column + 1)?;
+        let end_byte = self.line_index.byte_offset(end.line, end.column + 1)?;
+
+        Some((start_byte, end_byte))
     }
 }
 

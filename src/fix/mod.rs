@@ -183,6 +183,8 @@ pub fn apply_fixes(diagnostics: &[Diagnostic], base_dir: &Path) -> Result<usize,
         // Write atomically: write to temp file, then rename
         // This prevents corrupted files if the process is interrupted
         let parent = validated_path.parent().unwrap_or(Path::new("."));
+        // Justification: Unique temp filename needed per file; allocation is minor
+        // cargo-perf-ignore: format-in-loop
         let temp_path = parent.join(format!(
             ".cargo-perf-fix-{}.tmp",
             std::process::id()

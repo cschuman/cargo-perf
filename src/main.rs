@@ -31,6 +31,10 @@ struct Cli {
     /// Specific rules to run (comma-separated)
     #[arg(long)]
     rules: Option<String>,
+
+    /// Strict mode: only run high-confidence rules (async-block-in-async, lock-across-await)
+    #[arg(long)]
+    strict: bool,
 }
 
 #[derive(Subcommand)]
@@ -40,12 +44,10 @@ enum Commands {
         /// Path to analyze
         #[arg(default_value = ".")]
         path: PathBuf,
-    },
-    /// Apply auto-fixes
-    Fix {
-        /// Path to fix
-        #[arg(default_value = ".")]
-        path: PathBuf,
+
+        /// Strict mode: only run high-confidence rules
+        #[arg(long)]
+        strict: bool,
     },
     /// Initialize cargo-perf.toml config
     Init,
@@ -84,15 +86,13 @@ fn run() -> Result<()> {
     let config = Config::load_or_default(&cli.path)?;
 
     match cli.command {
-        Some(Commands::Check { path }) => {
-            run_check(&path, &config, cli.format, cli.min_severity, cli.fail_on)
+        Some(Commands::Check { path, strict }) => {
+            let strict_mode = strict || cli.strict;
+            run_check(&path, &config, cli.format, cli.min_severity, cli.fail_on, strict_mode)
         }
         None => {
             // Default to check with cli.path
-            run_check(&cli.path, &config, cli.format, cli.min_severity, cli.fail_on)
-        }
-        Some(Commands::Fix { path }) => {
-            run_fix(&path, &config)
+            run_check(&cli.path, &config, cli.format, cli.min_severity, cli.fail_on, cli.strict)
         }
         Some(Commands::Init) => {
             run_init(&cli.path)
@@ -103,19 +103,24 @@ fn run() -> Result<()> {
     }
 }
 
+/// High-confidence rules for strict mode
+const STRICT_RULES: &[&str] = &["async-block-in-async", "lock-across-await"];
+
 fn run_check(
     path: &Path,
     config: &Config,
     format: OutputFormat,
     min_severity: cargo_perf::Severity,
     fail_on: Option<cargo_perf::Severity>,
+    strict: bool,
 ) -> Result<()> {
     let diagnostics = analyze(path, config)?;
 
-    // Filter by minimum severity
+    // Filter by minimum severity and strict mode
     let diagnostics: Vec<_> = diagnostics
         .into_iter()
         .filter(|d| d.severity >= min_severity)
+        .filter(|d| !strict || STRICT_RULES.contains(&d.rule_id))
         .collect();
 
     // Report
@@ -142,13 +147,6 @@ fn run_check(
         }
     }
 
-    Ok(())
-}
-
-fn run_fix(path: &Path, config: &Config) -> Result<()> {
-    let diagnostics = analyze(path, config)?;
-    let fixed = cargo_perf::fix::apply_fixes(&diagnostics, path)?;
-    println!("Applied {} fix(es)", fixed);
     Ok(())
 }
 
