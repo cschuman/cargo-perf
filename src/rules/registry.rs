@@ -2,6 +2,9 @@
 //!
 //! Rules are initialized once using `LazyLock` and reused across all analysis runs.
 
+use super::allocation_rules::{
+    FormatInLoopRule, MutexLockInLoopRule, StringConcatLoopRule, VecNoCapacityRule,
+};
 use super::async_rules::AsyncBlockInAsyncRule;
 use super::iter_rules::CollectThenIterateRule;
 use super::memory_rules::{CloneInLoopRule, RegexInLoopRule};
@@ -12,10 +15,18 @@ use std::sync::LazyLock;
 /// Static registry of all rules, initialized once on first access.
 static RULES: LazyLock<Vec<Box<dyn Rule>>> = LazyLock::new(|| {
     vec![
+        // Async rules
         Box::new(AsyncBlockInAsyncRule),
+        // Memory rules
         Box::new(CloneInLoopRule),
         Box::new(RegexInLoopRule),
+        // Iterator rules
         Box::new(CollectThenIterateRule),
+        // Allocation rules
+        Box::new(VecNoCapacityRule),
+        Box::new(FormatInLoopRule),
+        Box::new(StringConcatLoopRule),
+        Box::new(MutexLockInLoopRule),
     ]
 });
 
@@ -93,5 +104,9 @@ mod tests {
         assert!(ids.contains(&"clone-in-hot-loop"));
         assert!(ids.contains(&"regex-in-loop"));
         assert!(ids.contains(&"collect-then-iterate"));
+        assert!(ids.contains(&"vec-no-capacity"));
+        assert!(ids.contains(&"format-in-loop"));
+        assert!(ids.contains(&"string-concat-loop"));
+        assert!(ids.contains(&"mutex-in-loop"));
     }
 }

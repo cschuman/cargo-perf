@@ -37,6 +37,7 @@ toml = "0.8"
 walkdir = "2"
 thiserror = "2"
 anyhow = "1"
+rayon = "1"
 
 [dev-dependencies]
 pretty_assertions = "1"

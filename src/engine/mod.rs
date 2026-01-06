@@ -7,8 +7,11 @@ pub use context::AnalysisContext;
 
 use crate::error::{Error, Result};
 use crate::rules::{registry, Diagnostic};
+use crate::suppression::SuppressionExtractor;
 use crate::Config;
-use std::path::Path;
+use rayon::prelude::*;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use walkdir::WalkDir;
 
 /// Maximum file size to analyze (10 MB)
@@ -24,10 +27,42 @@ impl<'a> Engine<'a> {
     }
 
     pub fn analyze(&self, path: &Path) -> Result<Vec<Diagnostic>> {
-        let mut all_diagnostics = Vec::new();
-        let mut errors = Vec::new();
+        // First, collect all valid file paths (sequential - fast)
+        let files = self.collect_files(path);
 
-        // Find all Rust files
+        // Analyze files in parallel
+        let errors: Mutex<Vec<(PathBuf, Error)>> = Mutex::new(Vec::new());
+
+        let all_diagnostics: Vec<Diagnostic> = files
+            .par_iter()
+            .flat_map(|file_path| {
+                match self.analyze_file(file_path) {
+                    Ok(diagnostics) => diagnostics,
+                    Err(e) => {
+                        // Collect errors but continue analyzing other files
+                        if let Ok(mut errs) = errors.lock() {
+                            errs.push((file_path.clone(), e));
+                        }
+                        Vec::new()
+                    }
+                }
+            })
+            .collect();
+
+        // Report errors at the end
+        if let Ok(errs) = errors.lock() {
+            for (path, error) in errs.iter() {
+                eprintln!("Warning: Failed to analyze {}: {}", path.display(), error);
+            }
+        }
+
+        Ok(all_diagnostics)
+    }
+
+    /// Collect all Rust files to analyze (sequential, fast).
+    fn collect_files(&self, path: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+
         // SECURITY: Explicitly disable symlink following to prevent attacks
         for entry in WalkDir::new(path)
             .follow_links(false)
@@ -62,6 +97,7 @@ impl<'a> Engine<'a> {
                         );
                         continue;
                     }
+                    files.push(file_path.to_path_buf());
                 }
                 Ok(_) => {
                     // Not a regular file (could be symlink), skip silently
@@ -76,22 +112,9 @@ impl<'a> Engine<'a> {
                     continue;
                 }
             }
-
-            match self.analyze_file(file_path) {
-                Ok(diagnostics) => all_diagnostics.extend(diagnostics),
-                Err(e) => {
-                    // Collect errors but continue analyzing other files
-                    errors.push((file_path.to_path_buf(), e));
-                }
-            }
         }
 
-        // Report errors at the end
-        for (path, error) in &errors {
-            eprintln!("Warning: Failed to analyze {}: {}", path.display(), error);
-        }
-
-        Ok(all_diagnostics)
+        files
     }
 
     fn analyze_file(&self, file_path: &Path) -> Result<Vec<Diagnostic>> {
@@ -101,6 +124,9 @@ impl<'a> Engine<'a> {
             .map_err(|e| Error::parse(file_path, e.to_string()))?;
 
         let ctx = AnalysisContext::new(file_path, &source, &ast, self.config);
+
+        // Extract suppressions for this file
+        let suppressions = SuppressionExtractor::new(&source, &ast);
 
         let mut diagnostics = Vec::new();
 
@@ -115,7 +141,13 @@ impl<'a> Engine<'a> {
             }
 
             let rule_diagnostics = rule.check(&ctx);
-            diagnostics.extend(rule_diagnostics);
+
+            // Filter out suppressed diagnostics
+            for diag in rule_diagnostics {
+                if !suppressions.is_suppressed(diag.rule_id, diag.line) {
+                    diagnostics.push(diag);
+                }
+            }
         }
 
         Ok(diagnostics)

@@ -1,3 +1,4 @@
+pub mod allocation_rules;
 pub mod async_rules;
 pub mod iter_rules;
 pub mod memory_rules;

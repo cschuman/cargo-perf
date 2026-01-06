@@ -8,6 +8,7 @@ pub mod error;
 pub mod fix;
 pub mod reporter;
 pub mod rules;
+pub mod suppression;
 
 pub use config::Config;
 pub use engine::{AnalysisContext, Engine};
