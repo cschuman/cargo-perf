@@ -2,6 +2,23 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.2.0] - 2025-01-05
+
+### Added
+- 4 new performance rules:
+  - `vec-no-capacity`: Detects `Vec::new()` + push in loop without `with_capacity`
+  - `format-in-loop`: Detects `format!()` allocations inside loops
+  - `string-concat-loop`: Detects String `+` operator in loops
+  - `mutex-in-loop`: Detects `Mutex::lock()` inside loops
+- Parallel file analysis using rayon for faster analysis of large codebases
+- Inline suppression support:
+  - `#[allow(cargo_perf::rule_id)]` attribute-based suppression
+  - `// cargo-perf-ignore: rule_id` comment-based suppression
+
+### Changed
+- Total rules: 8 (up from 4)
+- Total tests: 59 (up from 45)
+
 ## [0.1.0] - 2025-01-05
 
 ### Added

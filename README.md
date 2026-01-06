@@ -38,6 +38,31 @@ cargo perf init
 | `clone-in-hot-loop` | Warning | Detects `.clone()` calls on heap types inside loops |
 | `regex-in-loop` | Warning | Detects `Regex::new()` inside loops |
 | `collect-then-iterate` | Warning | Detects `.collect()` immediately followed by `.iter()` |
+| `vec-no-capacity` | Warning | Detects `Vec::new()` + push in loop without `with_capacity` |
+| `format-in-loop` | Warning | Detects `format!()` allocations inside loops |
+| `string-concat-loop` | Warning | Detects String `+` operator in loops |
+| `mutex-in-loop` | Warning | Detects `Mutex::lock()` inside loops |
+
+## Suppressing Warnings
+
+### Attribute-based suppression
+
+```rust
+#[allow(cargo_perf::clone_in_hot_loop)]
+fn my_function() {
+    // clone warnings suppressed in this function
+}
+```
+
+### Comment-based suppression
+
+```rust
+// cargo-perf-ignore: clone-in-hot-loop
+let x = data.clone(); // this line is suppressed
+
+// cargo-perf-ignore
+let y = data.clone(); // all rules suppressed on this line
+```
 
 ## Configuration
 
