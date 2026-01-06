@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.80"  # Required for LazyLock
 description = "Preventive performance analysis for Rust - catch anti-patterns before production"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/YOUR_USERNAME/cargo-perf"
+repository = "https://github.com/cschuman/cargo-perf"
 keywords = ["performance", "lint", "static-analysis", "cargo-plugin"]
 categories = ["development-tools", "development-tools::cargo-plugins"]
 

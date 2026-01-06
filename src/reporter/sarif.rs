@@ -147,7 +147,7 @@ impl SarifReport {
                     driver: SarifDriver {
                         name: "cargo-perf",
                         version: env!("CARGO_PKG_VERSION"),
-                        information_uri: "https://github.com/YOUR_USERNAME/cargo-perf",
+                        information_uri: "https://github.com/cschuman/cargo-perf",
                         rules,
                     },
                 },

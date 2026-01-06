@@ -82,7 +82,7 @@ impl Config {
     /// Generate default TOML config
     pub fn default_toml() -> &'static str {
         r#"# cargo-perf configuration
-# See https://github.com/YOUR_USERNAME/cargo-perf for documentation
+# See https://github.com/cschuman/cargo-perf for documentation
 
 [rules]
 # Set rule severity: "deny" (error), "warn" (warning), "allow" (ignore)
