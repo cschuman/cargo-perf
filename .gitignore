@@ -1,1 +1,30 @@
+# Build artifacts
 /target
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+*.profraw
+*.profdata
+/coverage/
+lcov.info
+tarpaulin-report.html
+
+# Debug
+*.log
+
+# Editor backups
+*~
+\#*\#

@@ -1,0 +1,60 @@
+name: Feature Request
+description: Suggest a new feature or rule
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement!
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Feature Type
+      options:
+        - New rule
+        - Improvement to existing rule
+        - CLI feature
+        - Output format
+        - Configuration option
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the feature you'd like
+      placeholder: I'd like cargo-perf to detect...
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: Why would this feature be useful?
+      placeholder: This would help catch bugs where...
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example Code
+      description: If proposing a new rule, show code that should trigger it
+      render: rust
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any workarounds or alternatives?
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to implement this feature
