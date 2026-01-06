@@ -5,9 +5,9 @@ mod parser;
 
 pub use context::AnalysisContext;
 
+use crate::error::{Error, Result};
 use crate::rules::{registry, Diagnostic};
 use crate::Config;
-use anyhow::Result;
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -95,8 +95,10 @@ impl<'a> Engine<'a> {
     }
 
     fn analyze_file(&self, file_path: &Path) -> Result<Vec<Diagnostic>> {
-        let source = std::fs::read_to_string(file_path)?;
-        let ast = parser::parse_file(&source)?;
+        let source = std::fs::read_to_string(file_path)
+            .map_err(|e| Error::io(file_path, e))?;
+        let ast = parser::parse_file(&source)
+            .map_err(|e| Error::parse(file_path, e.to_string()))?;
 
         let ctx = AnalysisContext::new(file_path, &source, &ast, self.config);
 
