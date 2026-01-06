@@ -88,21 +88,30 @@ struct SarifRegion {
 
 impl SarifReport {
     fn from_diagnostics(diagnostics: &[Diagnostic]) -> Self {
-        // Collect unique rules
-        let mut rules: Vec<SarifRule> = Vec::new();
-        let mut seen_rules = std::collections::HashSet::new();
+        use crate::rules::registry;
 
-        for d in diagnostics {
-            if seen_rules.insert(d.rule_id) {
-                rules.push(SarifRule {
-                    id: d.rule_id.to_string(),
-                    name: d.rule_id.to_string(),
+        // Collect unique rule IDs first (no cloning in loop)
+        let seen_rules: std::collections::HashSet<&str> = diagnostics
+            .iter()
+            .map(|d| d.rule_id)
+            .collect();
+
+        // Build rules list outside the loop using registry for descriptions
+        let rules: Vec<SarifRule> = seen_rules
+            .into_iter()
+            .map(|rule_id| {
+                let description = registry::get_rule(rule_id)
+                    .map(|r| r.description())
+                    .unwrap_or(rule_id);
+                SarifRule {
+                    id: rule_id.to_string(),
+                    name: rule_id.to_string(),
                     short_description: SarifMessage {
-                        text: d.message.clone(),
+                        text: description.to_string(),
                     },
-                });
-            }
-        }
+                }
+            })
+            .collect();
 
         let results: Vec<SarifResult> = diagnostics
             .iter()
