@@ -98,12 +98,7 @@ impl<'a> Engine<'a> {
         let source = std::fs::read_to_string(file_path)?;
         let ast = parser::parse_file(&source)?;
 
-        let ctx = AnalysisContext {
-            file_path,
-            source: &source,
-            ast: &ast,
-            config: self.config,
-        };
+        let ctx = AnalysisContext::new(file_path, &source, &ast, self.config);
 
         let mut diagnostics = Vec::new();
 
