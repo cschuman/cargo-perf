@@ -2,6 +2,7 @@
 name = "cargo-perf"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"  # Required for LazyLock
 description = "Preventive performance analysis for Rust - catch anti-patterns before production"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/YOUR_USERNAME/cargo-perf"
@@ -19,7 +20,6 @@ path = "src/lib.rs"
 [dependencies]
 # Parsing
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
-quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # CLI

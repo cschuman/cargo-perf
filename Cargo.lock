@@ -73,7 +73,6 @@ dependencies = [
  "colored",
  "pretty_assertions",
  "proc-macro2",
- "quote",
  "serde",
  "serde_json",
  "syn",
