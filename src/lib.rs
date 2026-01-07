@@ -26,11 +26,18 @@
 //!
 //! ## Rules
 //!
-//! cargo-perf includes 9 rules organized into categories:
+//! cargo-perf includes 12 rules organized into categories:
 //!
 //! ### Async Rules (Errors)
 //! - `async-block-in-async`: Blocking std calls in async functions
 //! - `lock-across-await`: Lock guards held across `.await` points
+//!
+//! ### Database Rules (Errors)
+//! - `n-plus-one-query`: Database queries inside loops (SQLx, Diesel, SeaORM)
+//!
+//! ### Async Warnings
+//! - `unbounded-channel`: Unbounded channels that can cause memory exhaustion
+//! - `unbounded-spawn`: Task spawning in loops without concurrency limits
 //!
 //! ### Loop Rules (Warnings)
 //! - `clone-in-hot-loop`: `.clone()` on heap types inside loops
@@ -42,6 +49,20 @@
 //!
 //! ### Iterator Rules (Warnings)
 //! - `collect-then-iterate`: `.collect().iter()` anti-pattern
+//!
+//! ## Extending with Custom Rules
+//!
+//! Use the [`plugin`] module to add custom rules:
+//!
+//! ```rust,ignore
+//! use cargo_perf::plugin::{PluginRegistry, analyze_with_plugins};
+//!
+//! let mut registry = PluginRegistry::new();
+//! registry.add_builtin_rules();
+//! registry.add_rule(Box::new(MyCustomRule));
+//!
+//! let diagnostics = analyze_with_plugins(path, &config, &registry)?;
+//! ```
 //!
 //! ## Configuration
 //!
@@ -69,9 +90,13 @@
 //! ```
 
 pub mod config;
+pub mod discovery;
 pub mod engine;
 pub mod error;
 pub mod fix;
+#[cfg(feature = "lsp")]
+pub mod lsp;
+pub mod plugin;
 pub mod reporter;
 pub mod rules;
 pub mod suppression;
@@ -80,7 +105,8 @@ pub use config::Config;
 pub use engine::{AnalysisContext, Engine};
 pub use error::{Error, Result};
 pub use fix::FixError;
-pub use rules::{Diagnostic, Rule, Severity};
+pub use plugin::{analyze_with_plugins, PluginRegistry, PluginRegistryBuilder};
+pub use rules::{Diagnostic, Fix, Replacement, Rule, Severity};
 
 /// Analyze Rust files at the given path for performance anti-patterns.
 ///

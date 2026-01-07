@@ -38,8 +38,9 @@ for line in lines {
 | **Purpose** | General code quality (style, correctness, complexity) | Async correctness + loop performance |
 | **Blocking calls in async** | No | Yes |
 | **Lock guards across await** | No | Yes |
+| **N+1 query detection** | No | Yes |
 | **Loop allocation patterns** | Limited | Comprehensive |
-| **Scope** | 700+ lints | 9 focused rules |
+| **Scope** | 700+ lints | 12 focused rules |
 
 **Use both:** `cargo clippy && cargo perf`
 
@@ -56,6 +57,8 @@ cargo perf                          # Analyze current directory
 cargo perf --strict                 # High-confidence rules only (CI recommended)
 cargo perf --strict --fail-on error # Fail CI on issues
 cargo perf --format sarif           # For GitHub Code Scanning
+cargo perf fix --dry-run            # Preview auto-fixes
+cargo perf fix                      # Apply auto-fixes
 ```
 
 ## Rules
@@ -66,11 +69,14 @@ cargo perf --format sarif           # For GitHub Code Scanning
 |------|-----------------|
 | `async-block-in-async` | `std::fs`, `thread::sleep`, blocking I/O in async functions |
 | `lock-across-await` | MutexGuard/RwLockGuard held across `.await` (deadlock risk) |
+| `n-plus-one-query` | Database queries inside loops (SQLx, Diesel, SeaORM) |
 
 ### Warnings (Medium Confidence)
 
 | Rule | What it catches | Impact |
 |------|-----------------|--------|
+| `unbounded-channel` | `mpsc::channel()`, `unbounded_channel()` | Memory exhaustion |
+| `unbounded-spawn` | `tokio::spawn` in loops | Resource exhaustion |
 | `regex-in-loop` | `Regex::new()` inside loops | 737x slower |
 | `clone-in-hot-loop` | `.clone()` on heap types in loops | 48x slower |
 | `collect-then-iterate` | `.collect().iter()` | 2.3x slower |
@@ -88,6 +94,8 @@ cargo perf --format sarif           # For GitHub Code Scanning
     cargo install cargo-perf
     cargo perf --strict --fail-on error
 ```
+
+For a complete workflow with SARIF integration for GitHub Code Scanning, see [examples/github-workflow.yml](examples/github-workflow.yml).
 
 ## Suppressing warnings
 
@@ -116,6 +124,66 @@ Real measurements (Apple M1 Pro, 1000 iterations):
 | Lock across await | **Deadlock** |
 
 See [benchmarks/](benchmarks/) for methodology.
+
+## IDE Integration
+
+cargo-perf includes an LSP server for real-time diagnostics in your editor.
+
+### Installation
+
+```bash
+cargo install cargo-perf --features lsp
+```
+
+### VS Code
+
+See [editors/vscode/](editors/vscode/) for the extension.
+
+### Neovim
+
+```lua
+require('lspconfig.configs').cargo_perf = {
+  default_config = {
+    cmd = { 'cargo-perf', 'lsp' },
+    filetypes = { 'rust' },
+    root_dir = require('lspconfig.util').root_pattern('Cargo.toml'),
+  },
+}
+require('lspconfig').cargo_perf.setup({})
+```
+
+### Other Editors
+
+See [editors/README.md](editors/README.md) for Emacs, Helix, Zed, and generic LSP setup.
+
+## Custom Rules (Plugin System)
+
+Extend cargo-perf with your own rules:
+
+```rust
+use cargo_perf::plugin::{PluginRegistry, analyze_with_plugins};
+use cargo_perf::rules::{Rule, Diagnostic, Severity};
+
+struct MyCustomRule;
+
+impl Rule for MyCustomRule {
+    fn id(&self) -> &'static str { "my-rule" }
+    fn name(&self) -> &'static str { "My Rule" }
+    fn description(&self) -> &'static str { "Detects my anti-pattern" }
+    fn default_severity(&self) -> Severity { Severity::Warning }
+
+    fn check(&self, ctx: &AnalysisContext) -> Vec<Diagnostic> {
+        // Your detection logic
+        Vec::new()
+    }
+}
+
+let mut registry = PluginRegistry::new();
+registry.add_rule(Box::new(MyCustomRule));
+let diagnostics = analyze_with_plugins(path, &config, &registry)?;
+```
+
+See [examples/custom_rule.rs](examples/custom_rule.rs) for a complete example.
 
 ## License
 

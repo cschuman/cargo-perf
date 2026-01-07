@@ -109,3 +109,89 @@ items.iter().map(|x| x * 2).sum()
 ```
 
 **Why it's slow:** `.collect()` allocates a Vec just to iterate over it again. The allocation is pure waste.
+
+---
+
+## Async Anti-patterns
+
+Run async benchmarks with:
+
+```bash
+cargo bench --bench async_patterns
+```
+
+### 6. Lock Held Across Await
+
+```rust
+// BAD: Holds lock across await - blocks other tasks
+let mut guard = mutex.lock().await;
+*guard += 1;
+tokio::time::sleep(Duration::from_millis(1)).await; // Lock still held!
+
+// GOOD: Release lock before await
+{
+    let mut guard = mutex.lock().await;
+    *guard += 1;
+} // Lock released
+tokio::time::sleep(Duration::from_millis(1)).await;
+```
+
+**Why it's slow:** When a lock is held across an `.await`, other tasks waiting for that lock are blocked even though the current task is just waiting. This creates unnecessary contention and can even cause deadlocks with standard library mutexes.
+
+### 7. Unbounded Channels
+
+```rust
+// BAD: Unbounded - producer can overwhelm consumer
+let (tx, rx) = mpsc::unbounded_channel();
+
+// GOOD: Bounded - provides backpressure
+let (tx, rx) = mpsc::channel(100);
+```
+
+**Why it's risky:** Unbounded channels can grow without limit. If the producer is faster than the consumer, memory usage grows unbounded until OOM. Bounded channels provide backpressure - the producer slows down when the consumer can't keep up.
+
+### 8. Unbounded Task Spawning
+
+```rust
+// BAD: Spawns unlimited concurrent tasks
+for id in ids {
+    tokio::spawn(process(id));
+}
+
+// GOOD: Limit concurrency with semaphore
+let semaphore = Arc::new(Semaphore::new(100));
+for id in ids {
+    let permit = semaphore.clone().acquire_owned().await?;
+    tokio::spawn(async move {
+        let _permit = permit;
+        process(id).await
+    });
+}
+
+// GOOD: Or use buffer_unordered
+stream::iter(ids)
+    .map(|id| process(id))
+    .buffer_unordered(100)
+    .collect::<Vec<_>>()
+    .await;
+```
+
+**Why it's risky:** Spawning unlimited tasks can exhaust memory (each task needs stack space), overwhelm the scheduler, and create thundering herd problems on shared resources. Always limit concurrency.
+
+### 9. Mutex Lock in Loop
+
+```rust
+// BAD: Acquires lock every iteration
+for item in items {
+    let mut guard = mutex.lock().await;
+    guard.push(item);
+}
+
+// GOOD: Acquire once
+let mut guard = mutex.lock().await;
+for item in items {
+    guard.push(item);
+}
+```
+
+**Why it's slow:** Lock acquisition has overhead (atomic operations, potential contention). Acquiring once outside the loop eliminates per-iteration overhead.

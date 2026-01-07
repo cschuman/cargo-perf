@@ -49,10 +49,27 @@ enum Commands {
         #[arg(long)]
         strict: bool,
     },
+    /// Apply auto-fixes for detected issues
+    Fix {
+        /// Path to analyze and fix
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Only show what would be fixed without making changes
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Specific rules to apply fixes for (comma-separated)
+        #[arg(long)]
+        rules: Option<String>,
+    },
     /// Initialize cargo-perf.toml config
     Init,
     /// List available rules
     Rules,
+    /// Start LSP server for IDE integration (requires 'lsp' feature)
+    #[cfg(feature = "lsp")]
+    Lsp,
 }
 
 #[derive(Clone, Copy, Default, clap::ValueEnum)]
@@ -94,13 +111,30 @@ fn run() -> Result<()> {
             // Default to check with cli.path
             run_check(&cli.path, &config, cli.format, cli.min_severity, cli.fail_on, cli.strict)
         }
+        Some(Commands::Fix { path, dry_run, rules }) => {
+            run_fix(&path, &config, dry_run, rules.as_deref())
+        }
         Some(Commands::Init) => {
             run_init(&cli.path)
         }
         Some(Commands::Rules) => {
             run_list_rules()
         }
+        #[cfg(feature = "lsp")]
+        Some(Commands::Lsp) => {
+            run_lsp()
+        }
     }
+}
+
+#[cfg(feature = "lsp")]
+fn run_lsp() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(cargo_perf::lsp::run_server());
+    Ok(())
 }
 
 /// High-confidence rules for strict mode
@@ -172,5 +206,77 @@ fn run_list_rules() -> Result<()> {
             rule.description()
         );
     }
+    Ok(())
+}
+
+fn run_fix(path: &Path, config: &Config, dry_run: bool, rules_filter: Option<&str>) -> Result<()> {
+    use cargo_perf::fix::apply_fixes;
+    use colored::Colorize;
+
+    // Run analysis
+    let diagnostics = analyze(path, config)?;
+
+    // Filter by rules if specified
+    let diagnostics: Vec<_> = if let Some(filter) = rules_filter {
+        let allowed_rules: Vec<&str> = filter.split(',').map(|s| s.trim()).collect();
+        diagnostics
+            .into_iter()
+            .filter(|d| allowed_rules.contains(&d.rule_id))
+            .collect()
+    } else {
+        diagnostics
+    };
+
+    // Count fixable diagnostics
+    let fixable: Vec<_> = diagnostics.iter().filter(|d| d.fix.is_some()).collect();
+    let total_fixes: usize = fixable.iter().filter_map(|d| d.fix.as_ref()).map(|f| f.replacements.len()).sum();
+
+    if fixable.is_empty() {
+        println!("{}", "No auto-fixes available for detected issues.".yellow());
+        if !diagnostics.is_empty() {
+            println!(
+                "\nFound {} issue(s), but none have auto-fix support yet.",
+                diagnostics.len()
+            );
+        }
+        return Ok(());
+    }
+
+    println!(
+        "Found {} fixable issue(s) with {} replacement(s):\n",
+        fixable.len(),
+        total_fixes
+    );
+
+    // Show what will be fixed
+    for diagnostic in &fixable {
+        if let Some(fix) = &diagnostic.fix {
+            println!(
+                "  {} {}:{} - {}",
+                diagnostic.rule_id.cyan(),
+                diagnostic.file_path.display(),
+                diagnostic.line,
+                fix.description
+            );
+        }
+    }
+
+    if dry_run {
+        println!("\n{}", "Dry run - no changes made.".yellow());
+        return Ok(());
+    }
+
+    // Apply fixes
+    let base_dir = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    match apply_fixes(&diagnostics, &base_dir) {
+        Ok(count) => {
+            println!("\n{}", format!("Applied {} fix(es).", count).green());
+            println!("Run `cargo perf check` to verify remaining issues.");
+        }
+        Err(e) => {
+            anyhow::bail!("Failed to apply fixes: {}", e);
+        }
+    }
+
     Ok(())
 }

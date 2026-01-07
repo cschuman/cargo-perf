@@ -6,8 +6,14 @@ publish = false
 
 [dependencies]
 regex = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+futures = "0.3"
 
 [[bench]]
 name = "antipatterns"
+harness = false
+
+[[bench]]
+name = "async_patterns"
 harness = false

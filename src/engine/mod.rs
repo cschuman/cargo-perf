@@ -5,6 +5,7 @@ mod parser;
 
 pub use context::AnalysisContext;
 
+use crate::discovery::{discover_rust_files, DiscoveryOptions, MAX_FILE_SIZE};
 use crate::error::{Error, Result};
 use crate::rules::{registry, Diagnostic};
 use crate::suppression::SuppressionExtractor;
@@ -14,10 +15,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use walkdir::WalkDir;
-
-/// Maximum file size to analyze (10 MB)
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 pub struct Engine<'a> {
     config: &'a Config,
@@ -63,62 +60,7 @@ impl<'a> Engine<'a> {
 
     /// Collect all Rust files to analyze (sequential, fast).
     fn collect_files(&self, path: &Path) -> Vec<PathBuf> {
-        let mut files = Vec::new();
-
-        // SECURITY: Explicitly disable symlink following to prevent attacks
-        for entry in WalkDir::new(path)
-            .follow_links(false)
-            .follow_root_links(false)
-            .into_iter()
-            .filter_entry(|e| !is_excluded_dir(e))
-            .filter_map(|e| e.ok())
-        {
-            // Skip non-files (directories, symlinks, etc.)
-            if !entry.file_type().is_file() {
-                continue;
-            }
-
-            let file_path = entry.path();
-
-            // Skip non-Rust files
-            if !file_path.extension().is_some_and(|ext| ext == "rs") {
-                continue;
-            }
-
-            // SECURITY: Double-check it's a regular file via metadata
-            // This catches TOCTOU edge cases
-            match std::fs::symlink_metadata(file_path) {
-                Ok(meta) if meta.is_file() => {
-                    // Check file size limit
-                    if meta.len() > MAX_FILE_SIZE {
-                        eprintln!(
-                            "Warning: Skipping {} (file too large: {} bytes, max: {} bytes)",
-                            file_path.display(),
-                            meta.len(),
-                            MAX_FILE_SIZE
-                        );
-                        continue;
-                    }
-                    // Justification: WalkDir is a lazy iterator with unknown length
-                    // cargo-perf-ignore: vec-no-capacity
-                    files.push(file_path.to_path_buf());
-                }
-                Ok(_) => {
-                    // Not a regular file (could be symlink), skip silently
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Cannot read metadata for {}: {}",
-                        file_path.display(),
-                        e
-                    );
-                    continue;
-                }
-            }
-        }
-
-        files
+        discover_rust_files(path, &DiscoveryOptions::secure())
     }
 
     fn analyze_file(&self, file_path: &Path) -> Result<Vec<Diagnostic>> {
@@ -164,6 +106,7 @@ impl<'a> Engine<'a> {
         // Extract suppressions for this file
         let suppressions = SuppressionExtractor::new(&source, &ast);
 
+        // cargo-perf-ignore: vec-no-capacity
         let mut diagnostics = Vec::new();
 
         for rule in registry::all_rules() {
@@ -181,8 +124,6 @@ impl<'a> Engine<'a> {
             // Filter out suppressed diagnostics
             for diag in rule_diagnostics {
                 if !suppressions.is_suppressed(diag.rule_id, diag.line) {
-                    // Justification: Diagnostic count varies per file, can't predict capacity
-                    // cargo-perf-ignore: vec-no-capacity
                     diagnostics.push(diag);
                 }
             }
@@ -190,36 +131,6 @@ impl<'a> Engine<'a> {
 
         Ok(diagnostics)
     }
-}
-
-/// Check if a directory entry should be excluded from traversal.
-///
-/// This excludes:
-/// - `target` directories (Cargo build output)
-/// - Hidden directories (starting with `.`)
-/// - Common dependency/build directories
-fn is_excluded_dir(entry: &walkdir::DirEntry) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-
-    let name = entry.file_name().to_string_lossy();
-
-    // Exclude target directory (cross-platform)
-    if name == "target" {
-        return true;
-    }
-
-    // Exclude hidden directories
-    if name.starts_with('.') {
-        return true;
-    }
-
-    // Exclude common non-source directories
-    matches!(
-        name.as_ref(),
-        "node_modules" | "vendor" | "third_party" | "build" | "dist" | "out"
-    )
 }
 
 #[cfg(test)]

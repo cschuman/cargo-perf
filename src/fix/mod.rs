@@ -5,7 +5,9 @@
 
 use crate::rules::{Diagnostic, Replacement};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 /// Errors that can occur during fix application
@@ -182,16 +184,20 @@ pub fn apply_fixes(diagnostics: &[Diagnostic], base_dir: &Path) -> Result<usize,
 
         // Write atomically: write to temp file, then rename
         // This prevents corrupted files if the process is interrupted
+        // SECURITY: Use tempfile crate to create secure temp file with random name
+        // This prevents symlink attacks on predictable temp file paths
         let parent = validated_path.parent().unwrap_or(Path::new("."));
-        // Justification: Unique temp filename needed per file; allocation is minor
-        // cargo-perf-ignore: format-in-loop
-        let temp_path = parent.join(format!(
-            ".cargo-perf-fix-{}.tmp",
-            std::process::id()
-        ));
+        let mut temp_file = NamedTempFile::new_in(parent)?;
 
-        std::fs::write(&temp_path, &result)?;
-        std::fs::rename(&temp_path, &validated_path)?;
+        // Write content to temp file
+        temp_file.write_all(result.as_bytes())?;
+        temp_file.flush()?;
+
+        // Atomically rename temp file to target
+        // persist() ensures the file isn't deleted when dropped
+        temp_file
+            .persist(&validated_path)
+            .map_err(|e| FixError::Io(e.error))?;
     }
 
     Ok(fixed)

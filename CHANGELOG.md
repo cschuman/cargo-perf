@@ -2,6 +2,34 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.5.0] - 2025-01-06
+
+### Added
+- **Plugin system**: Create custom rules via `PluginRegistry` and `define_rule!` macro
+- **LSP server**: IDE integration with real-time diagnostics (`--features lsp`)
+- **N+1 query detection**: New `n-plus-one-query` rule for sqlx, diesel, and SeaORM
+- **Unbounded spawn detection**: New `unbounded-spawn` rule for task spawning in loops
+- **Unbounded channel detection**: New `unbounded-channel` rule for memory exhaustion risks
+- Shared file discovery module with security options
+
+### Fixed
+- **`vec-no-capacity` UX**: Now reports at `Vec::new()` declaration (where fix applies) instead of `.push()` call
+- **False positives**: Database rules no longer flag `Vec::first()`, `HashMap::insert()`, etc.
+- **False positives**: `unbounded-spawn` validates receiver is actually an async runtime type
+- **Security**: LSP server validates paths and file sizes to prevent traversal/DoS
+- **Security**: Fix module uses `tempfile` crate properly for atomic writes (TOCTOU fix)
+- **Clippy clean**: All clippy warnings resolved, Entry API used for HashMap operations
+- Static methods for recursive helpers (no unnecessary `&self`)
+
+### Changed
+- `add_rule()` now has `try_add_rule()` non-panicking variant
+- Total rules: 12 (up from 9)
+- Total tests: 122 (up from 74)
+
+### Dog-fooding
+cargo-perf now passes all its own checks. Running `cargo-perf check ./src` reports zero issues.
+The dogfooding process identified and fixed the `vec-no-capacity` diagnostic location issue.
+
 ## [0.4.0] - 2025-01-05
 
 ### Added

@@ -1,0 +1,147 @@
+# cargo-perf GitHub Actions Workflow Template
+#
+# Copy this file to .github/workflows/cargo-perf.yml in your repository
+# to enable automatic performance anti-pattern detection on PRs.
+#
+# See https://github.com/your-org/cargo-perf for more information.
+
+name: Performance Analysis
+
+on:
+  pull_request:
+    paths:
+      - '**.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [main, master]
+    paths:
+      - '**.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin cargo-perf version for reproducibility
+  CARGO_PERF_VERSION: "0.4.0"
+
+jobs:
+  cargo-perf:
+    name: Performance Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo-perf
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-perf
+          key: cargo-perf-${{ env.CARGO_PERF_VERSION }}
+
+      - name: Install cargo-perf
+        run: |
+          if ! command -v cargo-perf &> /dev/null; then
+            cargo install cargo-perf --version ${{ env.CARGO_PERF_VERSION }}
+          fi
+
+      # Basic check - warns but doesn't fail
+      - name: Run cargo-perf
+        run: cargo perf check --format sarif > results.sarif
+        continue-on-error: true
+
+      # Upload results to GitHub Code Scanning (requires GitHub Advanced Security)
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+        if: always()
+        continue-on-error: true
+
+  # Strict mode - fails CI on high-confidence issues
+  cargo-perf-strict:
+    name: Performance Lint (Strict)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo-perf
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-perf
+          key: cargo-perf-${{ env.CARGO_PERF_VERSION }}
+
+      - name: Install cargo-perf
+        run: |
+          if ! command -v cargo-perf &> /dev/null; then
+            cargo install cargo-perf --version ${{ env.CARGO_PERF_VERSION }}
+          fi
+
+      # Strict mode: only async-block-in-async and lock-across-await
+      # These are high-confidence rules that indicate real bugs
+      - name: Run cargo-perf (strict)
+        run: cargo perf check --strict --fail-on error
+
+---
+# Alternative: Minimal workflow for quick setup
+#
+# name: Performance Analysis
+#
+# on: [pull_request]
+#
+# jobs:
+#   cargo-perf:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: dtolnay/rust-action@stable
+#       - run: cargo install cargo-perf
+#       - run: cargo perf check
+
+---
+# Alternative: PR comment workflow (no GitHub Advanced Security needed)
+#
+# This posts cargo-perf results as a PR comment instead of using SARIF.
+#
+# name: Performance Analysis
+#
+# on:
+#   pull_request:
+#     paths: ['**.rs']
+#
+# jobs:
+#   cargo-perf:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: dtolnay/rust-action@stable
+#       - run: cargo install cargo-perf
+#
+#       - name: Run cargo-perf
+#         id: perf
+#         run: |
+#           OUTPUT=$(cargo perf check 2>&1) || true
+#           echo "output<<EOF" >> $GITHUB_OUTPUT
+#           echo "$OUTPUT" >> $GITHUB_OUTPUT
+#           echo "EOF" >> $GITHUB_OUTPUT
+#
+#       - name: Comment on PR
+#         uses: actions/github-script@v7
+#         with:
+#           script: |
+#             const output = `${{ steps.perf.outputs.output }}`;
+#             if (output.includes('warning') || output.includes('error')) {
+#               github.rest.issues.createComment({
+#                 issue_number: context.issue.number,
+#                 owner: context.repo.owner,
+#                 repo: context.repo.repo,
+#                 body: `## cargo-perf Analysis\n\n\`\`\`\n${output}\n\`\`\``
+#               });
+#             }

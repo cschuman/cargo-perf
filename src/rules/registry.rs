@@ -5,7 +5,8 @@
 use super::allocation_rules::{
     FormatInLoopRule, MutexLockInLoopRule, StringConcatLoopRule, VecNoCapacityRule,
 };
-use super::async_rules::AsyncBlockInAsyncRule;
+use super::async_rules::{AsyncBlockInAsyncRule, UnboundedChannelRule, UnboundedSpawnRule};
+use super::database_rules::NPlusOneQueryRule;
 use super::iter_rules::CollectThenIterateRule;
 use super::lock_across_await::LockAcrossAwaitRule;
 use super::memory_rules::{CloneInLoopRule, RegexInLoopRule};
@@ -19,6 +20,10 @@ static RULES: LazyLock<Vec<Box<dyn Rule>>> = LazyLock::new(|| {
         // Async rules
         Box::new(AsyncBlockInAsyncRule),
         Box::new(LockAcrossAwaitRule),
+        Box::new(UnboundedChannelRule),
+        Box::new(UnboundedSpawnRule),
+        // Database rules
+        Box::new(NPlusOneQueryRule),
         // Memory rules
         Box::new(CloneInLoopRule),
         Box::new(RegexInLoopRule),
@@ -104,6 +109,9 @@ mod tests {
         let ids: Vec<_> = rule_ids().collect();
         assert!(ids.contains(&"async-block-in-async"));
         assert!(ids.contains(&"lock-across-await"));
+        assert!(ids.contains(&"unbounded-channel"));
+        assert!(ids.contains(&"unbounded-spawn"));
+        assert!(ids.contains(&"n-plus-one-query"));
         assert!(ids.contains(&"clone-in-hot-loop"));
         assert!(ids.contains(&"regex-in-loop"));
         assert!(ids.contains(&"collect-then-iterate"));

@@ -31,7 +31,7 @@ impl Rule for VecNoCapacityRule {
         let mut visitor = VecNoCapacityVisitor {
             ctx,
             diagnostics: Vec::new(),
-            vec_vars: std::collections::HashSet::new(),
+            vec_vars: std::collections::HashMap::new(),
             state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
@@ -42,7 +42,8 @@ impl Rule for VecNoCapacityRule {
 struct VecNoCapacityVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
-    vec_vars: std::collections::HashSet<String>,
+    /// Maps variable name to declaration location (line, column)
+    vec_vars: std::collections::HashMap<String, (usize, usize)>,
     state: VisitorState,
 }
 
@@ -52,7 +53,11 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
         if let Some(init) = &node.init {
             if is_vec_new(&init.expr) {
                 if let syn::Pat::Ident(pat_ident) = &node.pat {
-                    self.vec_vars.insert(pat_ident.ident.to_string());
+                    // Store declaration location for better diagnostic placement
+                    let span = pat_ident.ident.span();
+                    let line = span.start().line;
+                    let column = span.start().column;
+                    self.vec_vars.insert(pat_ident.ident.to_string(), (line, column));
                 }
             }
         }
@@ -92,11 +97,9 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
             // Check if receiver is a tracked Vec variable
             if let Expr::Path(ExprPath { path, .. }) = &*node.receiver {
                 if let Some(ident) = path.get_ident() {
-                    if self.vec_vars.contains(&ident.to_string()) {
-                        let span = node.method.span();
-                        let line = span.start().line;
-                        let column = span.start().column;
-
+                    let var_name = ident.to_string();
+                    if let Some(&(decl_line, decl_column)) = self.vec_vars.get(&var_name) {
+                        // Report at declaration location (where fix would be applied)
                         self.diagnostics.push(Diagnostic {
                             rule_id: "vec-no-capacity",
                             severity: Severity::Warning,
@@ -105,8 +108,8 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
                                 ident
                             ),
                             file_path: self.ctx.file_path.to_path_buf(),
-                            line,
-                            column,
+                            line: decl_line,
+                            column: decl_column,
                             end_line: None,
                             end_column: None,
                             suggestion: Some("Pre-allocate with `Vec::with_capacity(expected_size)`".to_string()),
@@ -114,7 +117,7 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
                         });
 
                         // Remove from tracking to avoid duplicate warnings
-                        self.vec_vars.remove(&ident.to_string());
+                        self.vec_vars.remove(&var_name);
                     }
                 }
             }

@@ -1,0 +1,84 @@
+{
+  "name": "cargo-perf",
+  "displayName": "cargo-perf",
+  "description": "Performance linting for Rust - catch async bugs and anti-patterns",
+  "version": "0.4.0",
+  "publisher": "cargo-perf",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cschuman/cargo-perf"
+  },
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "rust",
+    "performance",
+    "async",
+    "lint",
+    "static-analysis"
+  ],
+  "activationEvents": [
+    "onLanguage:rust"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "cargo-perf",
+      "properties": {
+        "cargo-perf.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable cargo-perf linting"
+        },
+        "cargo-perf.path": {
+          "type": "string",
+          "default": "cargo-perf",
+          "description": "Path to the cargo-perf executable"
+        },
+        "cargo-perf.strict": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable strict mode (high-confidence rules only)"
+        },
+        "cargo-perf.runOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run cargo-perf analysis on file save"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "cargo-perf.analyze",
+        "title": "Analyze workspace with cargo-perf"
+      },
+      {
+        "command": "cargo-perf.fix",
+        "title": "Apply cargo-perf auto-fixes"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.75.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  }
+}

@@ -1,5 +1,6 @@
 pub mod allocation_rules;
 pub mod async_rules;
+pub mod database_rules;
 pub mod iter_rules;
 pub mod lock_across_await;
 pub mod memory_rules;
