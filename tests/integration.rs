@@ -102,10 +102,8 @@ fn test_diagnostic_locations() {
 
     for diag in &diagnostics {
         assert!(diag.line > 0, "Line number should be positive");
-        assert!(
-            diag.column > 0 || diag.column == 0,
-            "Column should be valid"
-        );
+        // Column is usize, so always >= 0; just verify it's reasonable
+        assert!(diag.column < 10000, "Column should be reasonable");
         assert!(
             diag.file_path.ends_with("bad_code.rs"),
             "File path should be correct"

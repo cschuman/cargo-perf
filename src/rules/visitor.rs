@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn test_max_recursion_depth_is_reasonable() {
-        assert!(MAX_RECURSION_DEPTH >= 128);
-        assert!(MAX_RECURSION_DEPTH <= 512);
+        const { assert!(MAX_RECURSION_DEPTH >= 128) };
+        const { assert!(MAX_RECURSION_DEPTH <= 512) };
     }
 }

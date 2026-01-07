@@ -41,7 +41,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -81,7 +81,7 @@ impl Backend {
     /// Validate that a path is within the workspace boundaries.
     ///
     /// Returns the canonicalized path if valid, None otherwise.
-    async fn validate_path_in_workspace(&self, path: &PathBuf) -> Option<PathBuf> {
+    async fn validate_path_in_workspace(&self, path: &Path) -> Option<PathBuf> {
         let root = self.root_path.read().await.clone()?;
 
         // Canonicalize both paths to prevent ../ bypasses

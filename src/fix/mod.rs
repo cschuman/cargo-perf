@@ -205,6 +205,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
     #[test]
     fn test_path_traversal_rejected() {
         let temp_dir = TempDir::new().unwrap();
@@ -221,6 +222,21 @@ mod tests {
         } else {
             panic!("Expected PathTraversal error");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_path_traversal_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        // Create a path outside the base directory using Windows root
+        let evil_path = PathBuf::from("C:\\Windows\\System32\\cmd.exe");
+
+        let result = validate_path(&evil_path, base);
+        // On Windows, this should either fail with PathTraversal or Io error
+        // (Io if the file doesn't exist, PathTraversal if it does)
+        assert!(result.is_err());
     }
 
     #[test]
