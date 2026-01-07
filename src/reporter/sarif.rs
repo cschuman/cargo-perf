@@ -91,10 +91,8 @@ impl SarifReport {
         use crate::rules::registry;
 
         // Collect unique rule IDs first (no cloning in loop)
-        let seen_rules: std::collections::HashSet<&str> = diagnostics
-            .iter()
-            .map(|d| d.rule_id)
-            .collect();
+        let seen_rules: std::collections::HashSet<&str> =
+            diagnostics.iter().map(|d| d.rule_id).collect();
 
         // Build rules list outside the loop using registry for descriptions
         let rules: Vec<SarifRule> = seen_rules

@@ -64,7 +64,9 @@ fn get_collect_iter_removal_range(
 
 impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -83,16 +85,18 @@ impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
                     let column = span.start().column;
 
                     // Try to generate a fix
-                    let fix = get_collect_iter_removal_range(self.ctx, inner, node)
-                        .map(|(start, end)| Fix {
-                            description: "Remove .collect().iter() and continue iterator chain".to_string(),
+                    let fix = get_collect_iter_removal_range(self.ctx, inner, node).map(
+                        |(start, end)| Fix {
+                            description: "Remove .collect().iter() and continue iterator chain"
+                                .to_string(),
                             replacements: vec![Replacement {
                                 file_path: self.ctx.file_path.to_path_buf(),
                                 start_byte: start,
                                 end_byte: end,
                                 new_text: String::new(),
                             }],
-                        });
+                        },
+                    );
 
                     self.diagnostics.push(Diagnostic {
                         rule_id: "collect-then-iterate",
@@ -201,7 +205,11 @@ mod tests {
         "#;
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].suggestion.as_ref().unwrap().contains("Remove"));
+        assert!(diagnostics[0]
+            .suggestion
+            .as_ref()
+            .unwrap()
+            .contains("Remove"));
     }
 
     #[test]
@@ -245,7 +253,10 @@ mod tests {
         // Apply the fix manually to verify it works
         let replacement = &fix.replacements[0];
         let mut result = source.to_string();
-        result.replace_range(replacement.start_byte..replacement.end_byte, &replacement.new_text);
+        result.replace_range(
+            replacement.start_byte..replacement.end_byte,
+            &replacement.new_text,
+        );
 
         // The result should be valid Rust without .collect().iter()
         assert!(
@@ -269,7 +280,10 @@ mod tests {
         let fix = diagnostics[0].fix.as_ref().expect("Should have a fix");
         let replacement = &fix.replacements[0];
         let mut result = source.to_string();
-        result.replace_range(replacement.start_byte..replacement.end_byte, &replacement.new_text);
+        result.replace_range(
+            replacement.start_byte..replacement.end_byte,
+            &replacement.new_text,
+        );
 
         assert!(
             !result.contains(".collect::<Vec<_>>().into_iter()"),

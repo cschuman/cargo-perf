@@ -74,11 +74,7 @@ fn validate_path(path: &Path, base_dir: &Path) -> Result<std::path::PathBuf, Fix
 }
 
 /// Validate byte offsets for a replacement operation.
-fn validate_offsets(
-    replacement: &Replacement,
-    content: &str,
-    path: &Path,
-) -> Result<(), FixError> {
+fn validate_offsets(replacement: &Replacement, content: &str, path: &Path) -> Result<(), FixError> {
     let path_str = path.display().to_string();
     let len = content.len();
 

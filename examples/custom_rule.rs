@@ -61,8 +61,9 @@ impl<'ast> Visit<'ast> for UnwrapVisitor<'_> {
             self.diagnostics.push(Diagnostic {
                 rule_id: "no-unwrap",
                 severity: Severity::Warning,
-                message: "`.unwrap()` can panic; use `.expect()` with a message or handle the error"
-                    .to_string(),
+                message:
+                    "`.unwrap()` can panic; use `.expect()` with a message or handle the error"
+                        .to_string(),
                 file_path: self.ctx.file_path.to_path_buf(),
                 line,
                 column,

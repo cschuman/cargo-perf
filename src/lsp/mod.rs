@@ -176,7 +176,10 @@ impl Backend {
             Ok(diags) => diags,
             Err(e) => {
                 self.client
-                    .log_message(MessageType::ERROR, "Analysis failed. Check logs for details.")
+                    .log_message(
+                        MessageType::ERROR,
+                        "Analysis failed. Check logs for details.",
+                    )
                     .await;
                 // Log detailed error separately (not exposed to client)
                 eprintln!("cargo-perf analysis error: {}", e);
@@ -210,7 +213,10 @@ impl Backend {
             Ok(diags) => diags,
             Err(e) => {
                 self.client
-                    .log_message(MessageType::ERROR, format!("Workspace analysis failed: {}", e))
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Workspace analysis failed: {}", e),
+                    )
                     .await;
                 return;
             }
@@ -335,9 +341,8 @@ fn perf_diag_to_lsp(diag: PerfDiagnostic) -> tower_lsp::lsp_types::Diagnostic {
     if let Some(suggestion) = &diag.suggestion {
         related_info.push(DiagnosticRelatedInformation {
             location: Location {
-                uri: Url::from_file_path(&diag.file_path).unwrap_or_else(|_| {
-                    Url::parse("file:///unknown").unwrap()
-                }),
+                uri: Url::from_file_path(&diag.file_path)
+                    .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap()),
                 range,
             },
             message: suggestion.clone(),

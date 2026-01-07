@@ -105,25 +105,35 @@ fn run() -> Result<()> {
     match cli.command {
         Some(Commands::Check { path, strict }) => {
             let strict_mode = strict || cli.strict;
-            run_check(&path, &config, cli.format, cli.min_severity, cli.fail_on, strict_mode)
+            run_check(
+                &path,
+                &config,
+                cli.format,
+                cli.min_severity,
+                cli.fail_on,
+                strict_mode,
+            )
         }
         None => {
             // Default to check with cli.path
-            run_check(&cli.path, &config, cli.format, cli.min_severity, cli.fail_on, cli.strict)
+            run_check(
+                &cli.path,
+                &config,
+                cli.format,
+                cli.min_severity,
+                cli.fail_on,
+                cli.strict,
+            )
         }
-        Some(Commands::Fix { path, dry_run, rules }) => {
-            run_fix(&path, &config, dry_run, rules.as_deref())
-        }
-        Some(Commands::Init) => {
-            run_init(&cli.path)
-        }
-        Some(Commands::Rules) => {
-            run_list_rules()
-        }
+        Some(Commands::Fix {
+            path,
+            dry_run,
+            rules,
+        }) => run_fix(&path, &config, dry_run, rules.as_deref()),
+        Some(Commands::Init) => run_init(&cli.path),
+        Some(Commands::Rules) => run_list_rules(),
         #[cfg(feature = "lsp")]
-        Some(Commands::Lsp) => {
-            run_lsp()
-        }
+        Some(Commands::Lsp) => run_lsp(),
     }
 }
 
@@ -175,7 +185,10 @@ fn run_check(
         if diagnostics.iter().any(|d| d.severity >= fail_severity) {
             anyhow::bail!(
                 "Found {} diagnostic(s) at or above {:?} severity",
-                diagnostics.iter().filter(|d| d.severity >= fail_severity).count(),
+                diagnostics
+                    .iter()
+                    .filter(|d| d.severity >= fail_severity)
+                    .count(),
                 fail_severity
             );
         }
@@ -229,10 +242,17 @@ fn run_fix(path: &Path, config: &Config, dry_run: bool, rules_filter: Option<&st
 
     // Count fixable diagnostics
     let fixable: Vec<_> = diagnostics.iter().filter(|d| d.fix.is_some()).collect();
-    let total_fixes: usize = fixable.iter().filter_map(|d| d.fix.as_ref()).map(|f| f.replacements.len()).sum();
+    let total_fixes: usize = fixable
+        .iter()
+        .filter_map(|d| d.fix.as_ref())
+        .map(|f| f.replacements.len())
+        .sum();
 
     if fixable.is_empty() {
-        println!("{}", "No auto-fixes available for detected issues.".yellow());
+        println!(
+            "{}",
+            "No auto-fixes available for detected issues.".yellow()
+        );
         if !diagnostics.is_empty() {
             println!(
                 "\nFound {} issue(s), but none have auto-fix support yet.",

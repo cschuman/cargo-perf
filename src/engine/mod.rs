@@ -66,13 +66,11 @@ impl<'a> Engine<'a> {
     fn analyze_file(&self, file_path: &Path) -> Result<Vec<Diagnostic>> {
         // SECURITY: Use file descriptor to prevent TOCTOU attacks
         // Open file once, verify via fd metadata, then read from same fd
-        let mut file = File::open(file_path)
-            .map_err(|e| Error::io(file_path, e))?;
+        let mut file = File::open(file_path).map_err(|e| Error::io(file_path, e))?;
 
         // Get metadata from the open file descriptor (not the path)
         // This prevents race conditions where path is replaced after open
-        let metadata = file.metadata()
-            .map_err(|e| Error::io(file_path, e))?;
+        let metadata = file.metadata().map_err(|e| Error::io(file_path, e))?;
 
         // Verify it's still a regular file via the fd
         if !metadata.is_file() {
@@ -88,7 +86,11 @@ impl<'a> Engine<'a> {
                 file_path,
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("file too large: {} bytes (max: {} bytes)", metadata.len(), MAX_FILE_SIZE),
+                    format!(
+                        "file too large: {} bytes (max: {} bytes)",
+                        metadata.len(),
+                        MAX_FILE_SIZE
+                    ),
                 ),
             ));
         }
@@ -98,8 +100,8 @@ impl<'a> Engine<'a> {
         file.read_to_string(&mut source)
             .map_err(|e| Error::io(file_path, e))?;
 
-        let ast = parser::parse_file(&source)
-            .map_err(|e| Error::parse(file_path, e.to_string()))?;
+        let ast =
+            parser::parse_file(&source).map_err(|e| Error::parse(file_path, e.to_string()))?;
 
         let ctx = AnalysisContext::new(file_path, &source, &ast, self.config);
 

@@ -49,7 +49,10 @@ impl SuppressionExtractor {
 
         // Check line-level suppressions
         if let Some(suppressions) = self.line_suppressions.get(&line) {
-            if suppressions.is_empty() || suppressions.contains("all") || suppressions.contains(rule_id) {
+            if suppressions.is_empty()
+                || suppressions.contains("all")
+                || suppressions.contains(rule_id)
+            {
                 return true;
             }
         }
@@ -67,7 +70,8 @@ impl SuppressionExtractor {
                 let rest = &line[idx + "cargo-perf-ignore".len()..];
                 let rest = rest.trim_start_matches(':').trim();
 
-                let suppressions = self.line_suppressions
+                let suppressions = self
+                    .line_suppressions
                     .entry(line_num + 1) // Suppress the *next* line
                     .or_default();
 
@@ -94,7 +98,8 @@ impl SuppressionExtractor {
                 syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
             ) {
                 for path in nested {
-                    let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    let segments: Vec<_> =
+                        path.segments.iter().map(|s| s.ident.to_string()).collect();
 
                     if segments.first().map(|s| s.as_str()) == Some("cargo_perf") {
                         let rule_id = segments.get(1).map(|s| s.as_str()).unwrap_or("all");
@@ -123,7 +128,8 @@ impl SuppressionExtractor {
                     syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
                 ) {
                     for path in nested {
-                        let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+                        let segments: Vec<_> =
+                            path.segments.iter().map(|s| s.ident.to_string()).collect();
 
                         if segments.first().map(|s| s.as_str()) == Some("cargo_perf") {
                             let rule_id = segments.get(1).map(|s| s.as_str()).unwrap_or("all");
@@ -160,7 +166,10 @@ impl<'ast> Visit<'ast> for SuppressionExtractor {
         let end = match &node.fields {
             syn::Fields::Named(fields) => fields.brace_token.span.close().start().line,
             syn::Fields::Unnamed(fields) => fields.paren_token.span.close().start().line,
-            syn::Fields::Unit => node.semi_token.map(|t| t.span.start().line).unwrap_or(start),
+            syn::Fields::Unit => node
+                .semi_token
+                .map(|t| t.span.start().line)
+                .unwrap_or(start),
         };
         self.add_item_suppressions(&node.attrs, start, end);
         syn::visit::visit_item_struct(self, node);

@@ -49,14 +49,7 @@ struct LockAcrossAwaitVisitor<'a> {
 }
 
 /// Methods known to return lock guards
-const LOCK_METHODS: &[&str] = &[
-    "lock",
-    "try_lock",
-    "read",
-    "try_read",
-    "write",
-    "try_write",
-];
+const LOCK_METHODS: &[&str] = &["lock", "try_lock", "read", "try_read", "write", "try_write"];
 
 impl LockAcrossAwaitVisitor<'_> {
     /// Extract variable name from a pattern
@@ -210,7 +203,9 @@ impl LockAcrossAwaitVisitor<'_> {
 
 impl<'ast> Visit<'ast> for LockAcrossAwaitVisitor<'_> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
 
         let is_async = node.sig.asyncness.is_some();
@@ -224,7 +219,9 @@ impl<'ast> Visit<'ast> for LockAcrossAwaitVisitor<'_> {
     }
 
     fn visit_expr(&mut self, node: &'ast Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();

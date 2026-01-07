@@ -43,28 +43,36 @@ struct CloneInLoopVisitor<'a> {
 
 impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -79,7 +87,9 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
             self.diagnostics.push(Diagnostic {
                 rule_id: "clone-in-hot-loop",
                 severity: Severity::Warning,
-                message: "`.clone()` called inside loop; consider borrowing or moving the clone outside".to_string(),
+                message:
+                    "`.clone()` called inside loop; consider borrowing or moving the clone outside"
+                        .to_string(),
                 file_path: self.ctx.file_path.to_path_buf(),
                 line,
                 column,
@@ -132,28 +142,36 @@ struct RegexInLoopVisitor<'a> {
 
 impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -170,7 +188,10 @@ impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
                     .join("::");
 
                 if path_str.contains("Regex") && path_str.contains("new") {
-                    let span = path.segments.last().map(|s| s.ident.span())
+                    let span = path
+                        .segments
+                        .last()
+                        .map(|s| s.ident.span())
                         .unwrap_or_else(proc_macro2::Span::call_site);
                     let line = span.start().line;
                     let column = span.start().column;
@@ -178,13 +199,17 @@ impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
                     self.diagnostics.push(Diagnostic {
                         rule_id: "regex-in-loop",
                         severity: Severity::Warning,
-                        message: "`Regex::new()` called inside loop; compile regex once outside".to_string(),
+                        message: "`Regex::new()` called inside loop; compile regex once outside"
+                            .to_string(),
                         file_path: self.ctx.file_path.to_path_buf(),
                         line,
                         column,
                         end_line: None,
                         end_column: None,
-                        suggestion: Some("Use `lazy_static!` or `once_cell::Lazy` to compile the regex once".to_string()),
+                        suggestion: Some(
+                            "Use `lazy_static!` or `once_cell::Lazy` to compile the regex once"
+                                .to_string(),
+                        ),
                         fix: None,
                     });
                 }

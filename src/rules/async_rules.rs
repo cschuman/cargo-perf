@@ -77,12 +77,24 @@ const UNBOUNDED_CHANNELS: &[(&str, &str, bool)] = &[
     // tokio unbounded - explicit function name
     ("unbounded_channel", "tokio::sync::mpsc::channel(N)", false),
     // crossbeam unbounded
-    ("crossbeam_channel::unbounded", "crossbeam_channel::bounded(N)", false),
-    ("crossbeam::channel::unbounded", "crossbeam::channel::bounded(N)", false),
+    (
+        "crossbeam_channel::unbounded",
+        "crossbeam_channel::bounded(N)",
+        false,
+    ),
+    (
+        "crossbeam::channel::unbounded",
+        "crossbeam::channel::bounded(N)",
+        false,
+    ),
     // flume unbounded
     ("flume::unbounded", "flume::bounded(N)", false),
     // async-channel unbounded
-    ("async_channel::unbounded", "async_channel::bounded(N)", false),
+    (
+        "async_channel::unbounded",
+        "async_channel::bounded(N)",
+        false,
+    ),
 ];
 
 /// Patterns that need special handling to avoid false positives
@@ -259,18 +271,10 @@ struct UnboundedSpawnVisitor<'a> {
 }
 
 /// Task spawn functions that should be bounded when used in loops
-const SPAWN_FUNCTIONS: &[&str] = &[
-    "spawn",
-    "spawn_local",
-    "spawn_blocking",
-];
+const SPAWN_FUNCTIONS: &[&str] = &["spawn", "spawn_local", "spawn_blocking"];
 
 /// Prefixes that indicate async runtime spawn functions
-const SPAWN_PREFIXES: &[&str] = &[
-    "tokio",
-    "async_std",
-    "smol",
-];
+const SPAWN_PREFIXES: &[&str] = &["tokio", "async_std", "smol"];
 
 impl UnboundedSpawnVisitor<'_> {
     fn check_spawn_call(&mut self, path_str: &str, span: proc_macro2::Span) {
@@ -278,8 +282,8 @@ impl UnboundedSpawnVisitor<'_> {
         for &spawn_fn in SPAWN_FUNCTIONS {
             if path_str.ends_with(spawn_fn) {
                 // Verify it looks like an async runtime spawn
-                let is_runtime_spawn = SPAWN_PREFIXES.iter().any(|p| path_str.contains(p))
-                    || path_str == spawn_fn; // bare `spawn` after `use`
+                let is_runtime_spawn =
+                    SPAWN_PREFIXES.iter().any(|p| path_str.contains(p)) || path_str == spawn_fn; // bare `spawn` after `use`
 
                 if is_runtime_spawn {
                     let line = span.start().line;
@@ -299,7 +303,8 @@ impl UnboundedSpawnVisitor<'_> {
                         end_line: None,
                         end_column: None,
                         suggestion: Some(
-                            "Use a Semaphore, buffer_unordered(), or JoinSet with limits".to_string(),
+                            "Use a Semaphore, buffer_unordered(), or JoinSet with limits"
+                                .to_string(),
                         ),
                         fix: None,
                     });
@@ -544,16 +549,44 @@ const BLOCKING_CALLS: &[(&str, &str, &str)] = &[
     // Thread operations
     ("std::thread", "sleep", "tokio::time::sleep"),
     // Network operations
-    ("std::net::TcpStream", "connect", "tokio::net::TcpStream::connect"),
-    ("std::net::TcpListener", "bind", "tokio::net::TcpListener::bind"),
+    (
+        "std::net::TcpStream",
+        "connect",
+        "tokio::net::TcpStream::connect",
+    ),
+    (
+        "std::net::TcpListener",
+        "bind",
+        "tokio::net::TcpListener::bind",
+    ),
     ("std::net::UdpSocket", "bind", "tokio::net::UdpSocket::bind"),
     // Process operations
-    ("std::process::Command", "output", "tokio::process::Command::output"),
-    ("std::process::Command", "status", "tokio::process::Command::status"),
-    ("std::process::Command", "spawn", "tokio::process::Command::spawn"),
+    (
+        "std::process::Command",
+        "output",
+        "tokio::process::Command::output",
+    ),
+    (
+        "std::process::Command",
+        "status",
+        "tokio::process::Command::status",
+    ),
+    (
+        "std::process::Command",
+        "spawn",
+        "tokio::process::Command::spawn",
+    ),
     // IO operations
-    ("std::io::stdin", "read_line", "tokio::io::AsyncBufReadExt::read_line"),
-    ("std::io::Stdin", "read_line", "tokio::io::AsyncBufReadExt::read_line"),
+    (
+        "std::io::stdin",
+        "read_line",
+        "tokio::io::AsyncBufReadExt::read_line",
+    ),
+    (
+        "std::io::Stdin",
+        "read_line",
+        "tokio::io::AsyncBufReadExt::read_line",
+    ),
 ];
 
 impl AsyncBlockingVisitor<'_> {
@@ -569,8 +602,7 @@ impl AsyncBlockingVisitor<'_> {
             if full_path.ends_with(func_name) {
                 // Verify it's a word boundary (preceded by :: or start of string)
                 let prefix_len = full_path.len().saturating_sub(func_name.len());
-                let is_boundary = prefix_len == 0
-                    || full_path[..prefix_len].ends_with("::");
+                let is_boundary = prefix_len == 0 || full_path[..prefix_len].ends_with("::");
 
                 if is_boundary && func_name.len() > best_match_len {
                     best_match = Some((func_name, alternative));
@@ -604,7 +636,9 @@ impl AsyncBlockingVisitor<'_> {
 
 impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         let was_async = self.in_async_fn;
         self.in_async_fn = node.sig.asyncness.is_some();
@@ -614,7 +648,9 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -630,7 +666,13 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
-                self.check_blocking_call(&path_str, path.segments.first().map(|s| s.ident.span()).unwrap_or_else(proc_macro2::Span::call_site));
+                self.check_blocking_call(
+                    &path_str,
+                    path.segments
+                        .first()
+                        .map(|s| s.ident.span())
+                        .unwrap_or_else(proc_macro2::Span::call_site),
+                );
             }
         }
         syn::visit::visit_expr_call(self, node);
@@ -952,7 +994,10 @@ mod tests {
             }
         "#;
         let diagnostics = check_code(source);
-        assert!(diagnostics.is_empty(), "Should not flag blocking calls in sync functions");
+        assert!(
+            diagnostics.is_empty(),
+            "Should not flag blocking calls in sync functions"
+        );
     }
 
     #[test]
@@ -996,6 +1041,10 @@ mod tests {
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
         // Should suggest tokio::fs::read_to_string, not tokio::fs::read
-        assert!(diagnostics[0].suggestion.as_ref().unwrap().contains("read_to_string"));
+        assert!(diagnostics[0]
+            .suggestion
+            .as_ref()
+            .unwrap()
+            .contains("read_to_string"));
     }
 }

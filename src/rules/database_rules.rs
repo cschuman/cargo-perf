@@ -109,11 +109,7 @@ const SEAORM_AMBIGUOUS_METHODS: &[&str] = &["one", "all", "find"];
 const AMBIGUOUS_OPERATIONS: &[&str] = &["insert", "update", "delete", "save", "execute"];
 
 /// Diesel table operations
-const DIESEL_OPERATIONS: &[&str] = &[
-    "insert_into",
-    "update",
-    "delete",
-];
+const DIESEL_OPERATIONS: &[&str] = &["insert_into", "update", "delete"];
 
 impl NPlusOneVisitor<'_> {
     fn report_diagnostic(&mut self, span: proc_macro2::Span, orm_hint: &str, pattern: &str) {
@@ -145,8 +141,7 @@ impl NPlusOneVisitor<'_> {
         for &func in SQLX_QUERY_FUNCTIONS {
             if path_str.ends_with(func) {
                 let prefix_len = path_str.len().saturating_sub(func.len());
-                let is_boundary =
-                    prefix_len == 0 || path_str[..prefix_len].ends_with("::");
+                let is_boundary = prefix_len == 0 || path_str[..prefix_len].ends_with("::");
                 if is_boundary {
                     self.report_diagnostic(
                         span,
@@ -165,8 +160,7 @@ impl NPlusOneVisitor<'_> {
         for &op in DIESEL_OPERATIONS {
             if path_str.ends_with(op) {
                 let prefix_len = path_str.len().saturating_sub(op.len());
-                let is_boundary =
-                    prefix_len == 0 || path_str[..prefix_len].ends_with("::");
+                let is_boundary = prefix_len == 0 || path_str[..prefix_len].ends_with("::");
                 if is_boundary {
                     self.report_diagnostic(
                         span,
@@ -275,7 +269,10 @@ impl NPlusOneVisitor<'_> {
             if let Expr::Path(path) = arg {
                 if let Some(ident) = path.path.get_ident() {
                     let name = ident.to_string().to_lowercase();
-                    if DB_CONNECTION_NAMES.iter().any(|&db_name| name.contains(db_name)) {
+                    if DB_CONNECTION_NAMES
+                        .iter()
+                        .any(|&db_name| name.contains(db_name))
+                    {
                         return true;
                     }
                 }
@@ -285,7 +282,10 @@ impl NPlusOneVisitor<'_> {
                 if let Expr::Path(path) = &*ref_expr.expr {
                     if let Some(ident) = path.path.get_ident() {
                         let name = ident.to_string().to_lowercase();
-                        if DB_CONNECTION_NAMES.iter().any(|&db_name| name.contains(db_name)) {
+                        if DB_CONNECTION_NAMES
+                            .iter()
+                            .any(|&db_name| name.contains(db_name))
+                        {
                             return true;
                         }
                     }
@@ -438,14 +438,22 @@ impl<'ast> Visit<'ast> for NPlusOneVisitor<'_> {
                     .join("::");
 
                 // Check for SQLx calls
-                self.check_sqlx_call(&path_str, path.segments.last()
-                    .map(|s| s.ident.span())
-                    .unwrap_or_else(proc_macro2::Span::call_site));
+                self.check_sqlx_call(
+                    &path_str,
+                    path.segments
+                        .last()
+                        .map(|s| s.ident.span())
+                        .unwrap_or_else(proc_macro2::Span::call_site),
+                );
 
                 // Check for Diesel calls
-                self.check_diesel_call(&path_str, path.segments.last()
-                    .map(|s| s.ident.span())
-                    .unwrap_or_else(proc_macro2::Span::call_site));
+                self.check_diesel_call(
+                    &path_str,
+                    path.segments
+                        .last()
+                        .map(|s| s.ident.span())
+                        .unwrap_or_else(proc_macro2::Span::call_site),
+                );
             }
         }
         syn::visit::visit_expr_call(self, node);
@@ -494,7 +502,9 @@ mod tests {
         "#;
         let diagnostics = check_code(source);
         assert!(!diagnostics.is_empty());
-        assert!(diagnostics.iter().any(|d| d.message.contains("sqlx::query")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("sqlx::query")));
     }
 
     #[test]
@@ -602,7 +612,9 @@ mod tests {
         "#;
         let diagnostics = check_code(source);
         assert!(!diagnostics.is_empty());
-        assert!(diagnostics.iter().any(|d| d.message.contains("insert_into") || d.message.contains("execute")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("insert_into") || d.message.contains("execute")));
     }
 
     // SeaORM tests
@@ -618,7 +630,9 @@ mod tests {
         let diagnostics = check_code(source);
         assert!(!diagnostics.is_empty());
         // Should detect both find_by_id and one
-        assert!(diagnostics.iter().any(|d| d.message.contains("find_by_id") || d.message.contains("one")));
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("find_by_id") || d.message.contains("one")));
     }
 
     #[test]

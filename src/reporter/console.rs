@@ -7,9 +7,18 @@ pub fn report(diagnostics: &[Diagnostic]) {
         return;
     }
 
-    let error_count = diagnostics.iter().filter(|d| d.severity == Severity::Error).count();
-    let warning_count = diagnostics.iter().filter(|d| d.severity == Severity::Warning).count();
-    let info_count = diagnostics.iter().filter(|d| d.severity == Severity::Info).count();
+    let error_count = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    let warning_count = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .count();
+    let info_count = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .count();
 
     for diagnostic in diagnostics {
         print_diagnostic(diagnostic);
@@ -44,13 +53,7 @@ fn print_diagnostic(d: &Diagnostic) {
 
     let rule_id = format!("[{}]", d.rule_id).dimmed();
 
-    println!(
-        "{}{} {} {}",
-        severity_str,
-        ":".bold(),
-        d.message,
-        rule_id,
-    );
+    println!("{}{} {} {}", severity_str, ":".bold(), d.message, rule_id,);
 
     println!(
         "  {} {}:{}:{}",

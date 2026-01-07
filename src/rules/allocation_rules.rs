@@ -57,7 +57,8 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
                     let span = pat_ident.ident.span();
                     let line = span.start().line;
                     let column = span.start().column;
-                    self.vec_vars.insert(pat_ident.ident.to_string(), (line, column));
+                    self.vec_vars
+                        .insert(pat_ident.ident.to_string(), (line, column));
                 }
             }
         }
@@ -65,28 +66,36 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -186,28 +195,36 @@ struct FormatInLoopVisitor<'a> {
 
 impl<'ast> Visit<'ast> for FormatInLoopVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -223,7 +240,10 @@ impl<'ast> Visit<'ast> for FormatInLoopVisitor<'_> {
                 .unwrap_or_default();
 
             if macro_name == "format" {
-                let span = node.path.segments.last()
+                let span = node
+                    .path
+                    .segments
+                    .last()
                     .map(|s| s.ident.span())
                     .unwrap_or_else(proc_macro2::Span::call_site);
                 let line = span.start().line;
@@ -286,28 +306,36 @@ struct StringConcatVisitor<'a> {
 
 impl<'ast> Visit<'ast> for StringConcatVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -382,7 +410,10 @@ impl StringConcatVisitor<'_> {
         let new_text = format!("{}.push_str({})", var_name, rhs_text);
 
         Some(Fix {
-            description: format!("Replace `{} += ...` with `{}.push_str(...)`", var_name, var_name),
+            description: format!(
+                "Replace `{} += ...` with `{}.push_str(...)`",
+                var_name, var_name
+            ),
             replacements: vec![Replacement {
                 file_path: self.ctx.file_path.to_path_buf(),
                 start_byte: start,
@@ -396,8 +427,13 @@ impl StringConcatVisitor<'_> {
 /// Check if an expression is definitely NOT a string (e.g., integer/float literals)
 fn is_definitely_numeric(expr: &Expr) -> bool {
     match expr {
-        Expr::Lit(lit) => matches!(&lit.lit,
-            syn::Lit::Int(_) | syn::Lit::Float(_) | syn::Lit::Byte(_) | syn::Lit::Bool(_) | syn::Lit::Char(_)
+        Expr::Lit(lit) => matches!(
+            &lit.lit,
+            syn::Lit::Int(_)
+                | syn::Lit::Float(_)
+                | syn::Lit::Byte(_)
+                | syn::Lit::Bool(_)
+                | syn::Lit::Char(_)
         ),
         Expr::Reference(r) => is_definitely_numeric(&r.expr),
         Expr::Paren(p) => is_definitely_numeric(&p.expr),
@@ -419,19 +455,21 @@ fn is_definitely_string(expr: &Expr) -> bool {
         }
 
         // High confidence: format! macro
-        Expr::Macro(m) => {
-            m.mac.path.segments.last()
-                .map(|s| s.ident == "format")
-                .unwrap_or(false)
-        }
+        Expr::Macro(m) => m
+            .mac
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident == "format")
+            .unwrap_or(false),
 
         // Check references
         Expr::Reference(r) => is_definitely_string(&r.expr),
 
         // For binary expressions like `s + "text"`, check recursively
         Expr::Binary(bin) => {
-            matches!(&bin.op, syn::BinOp::Add(_)) &&
-            (is_definitely_string(&bin.left) || is_definitely_string(&bin.right))
+            matches!(&bin.op, syn::BinOp::Add(_))
+                && (is_definitely_string(&bin.left) || is_definitely_string(&bin.right))
         }
 
         _ => false,
@@ -494,28 +532,36 @@ struct MutexLockVisitor<'a> {
 
 impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_while(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_loop(self, node);
         self.state.exit_loop();
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if self.state.should_bail() { return; }
+        if self.state.should_bail() {
+            return;
+        }
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
@@ -541,7 +587,9 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
                     column,
                     end_line: None,
                     end_column: None,
-                    suggestion: Some("Acquire the lock before the loop to reduce lock contention".to_string()),
+                    suggestion: Some(
+                        "Acquire the lock before the loop to reduce lock contention".to_string(),
+                    ),
                     fix: None,
                 });
             }
@@ -731,24 +779,26 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
 
         // Check that fix is generated for += case
-        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix for +=");
+        let fix = diagnostics[0]
+            .fix
+            .as_ref()
+            .expect("Should have a fix for +=");
         assert_eq!(fix.replacements.len(), 1);
 
         // Apply fix and verify
         let replacement = &fix.replacements[0];
         let mut result = source.to_string();
-        result.replace_range(replacement.start_byte..replacement.end_byte, &replacement.new_text);
+        result.replace_range(
+            replacement.start_byte..replacement.end_byte,
+            &replacement.new_text,
+        );
 
         assert!(
             result.contains("s.push_str(\"x\")"),
             "Fix should convert to push_str: {}",
             result
         );
-        assert!(
-            !result.contains("s +="),
-            "Fix should remove +=: {}",
-            result
-        );
+        assert!(!result.contains("s +="), "Fix should remove +=: {}", result);
     }
 
     // Mutex tests
