@@ -55,27 +55,25 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build
+        shell: bash
         env:
-          BUILD_TARGET: ${{ matrix.target }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target "$BUILD_TARGET"
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
+        shell: bash
         run: |
-          cd "target/$BUILD_TARGET/release"
-          tar czvf "../../../cargo-perf-$BUILD_TARGET.tar.gz" cargo-perf
+          cd target/${{ matrix.target }}/release
+          tar czvf ../../../cargo-perf-${{ matrix.target }}.tar.gz cargo-perf
           cd ../../..
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
+        shell: bash
         run: |
-          cd "target/$env:BUILD_TARGET/release"
-          7z a "../../../cargo-perf-$env:BUILD_TARGET.zip" cargo-perf.exe
+          cd target/${{ matrix.target }}/release
+          7z a ../../../cargo-perf-${{ matrix.target }}.zip cargo-perf.exe
           cd ../../..
 
       - name: Upload artifact
