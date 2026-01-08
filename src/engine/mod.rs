@@ -1,18 +1,17 @@
 //! Analysis engine - coordinates file discovery and rule execution.
 
 mod context;
+pub mod file_analyzer;
 mod parser;
 
 pub use context::{AnalysisContext, LineIndex};
+pub use file_analyzer::{analyze_file_with_rules, read_file_secure};
 
-use crate::discovery::{discover_rust_files, DiscoveryOptions, MAX_FILE_SIZE};
+use crate::discovery::{discover_rust_files, DiscoveryOptions};
 use crate::error::{Error, Result};
 use crate::rules::{registry, Diagnostic};
-use crate::suppression::SuppressionExtractor;
 use crate::Config;
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -64,87 +63,9 @@ impl<'a> Engine<'a> {
     }
 
     fn analyze_file(&self, file_path: &Path) -> Result<Vec<Diagnostic>> {
-        // SECURITY: Use file descriptor to prevent TOCTOU attacks
-        // Open file once, verify via fd metadata, then read from same fd
-        let mut file = File::open(file_path).map_err(|e| Error::io(file_path, e))?;
-
-        // Get metadata from the open file descriptor (not the path)
-        // This prevents race conditions where path is replaced after open
-        let metadata = file.metadata().map_err(|e| Error::io(file_path, e))?;
-
-        // Verify it's still a regular file via the fd
-        if !metadata.is_file() {
-            return Err(Error::io(
-                file_path,
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
-            ));
-        }
-
-        // Check file size via fd metadata
-        if metadata.len() > MAX_FILE_SIZE {
-            return Err(Error::io(
-                file_path,
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "file too large: {} bytes (max: {} bytes)",
-                        metadata.len(),
-                        MAX_FILE_SIZE
-                    ),
-                ),
-            ));
-        }
-
-        // Read from the same file descriptor
-        let mut source = String::with_capacity(metadata.len() as usize);
-        file.read_to_string(&mut source)
-            .map_err(|e| Error::io(file_path, e))?;
-
-        let ast =
-            parser::parse_file(&source).map_err(|e| Error::parse(file_path, e.to_string()))?;
-
-        let ctx = AnalysisContext::new(file_path, &source, &ast, self.config);
-
-        // Extract suppressions for this file
-        let suppressions = SuppressionExtractor::new(&source, &ast);
-
-        // cargo-perf-ignore: vec-no-capacity
-        let mut diagnostics = Vec::new();
-
-        for rule in registry::all_rules() {
-            // Check if rule is enabled via config
-            if self
-                .config
-                .rule_severity(rule.id(), rule.default_severity())
-                .is_none()
-            {
-                continue;
-            }
-
-            // Catch panics in rule execution to prevent one bad rule from crashing analysis
-            let rule_diagnostics = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                rule.check(&ctx)
-            })) {
-                Ok(diags) => diags,
-                Err(_) => {
-                    eprintln!(
-                        "Warning: Rule '{}' panicked while analyzing {}",
-                        rule.id(),
-                        file_path.display()
-                    );
-                    continue;
-                }
-            };
-
-            // Filter out suppressed diagnostics
-            for diag in rule_diagnostics {
-                if !suppressions.is_suppressed(diag.rule_id, diag.line) {
-                    diagnostics.push(diag);
-                }
-            }
-        }
-
-        Ok(diagnostics)
+        // Use shared file analysis logic with static registry rules
+        let rules = registry::all_rules().iter().map(|r| r.as_ref());
+        analyze_file_with_rules(file_path, self.config, rules)
     }
 }
 

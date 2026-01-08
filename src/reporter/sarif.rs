@@ -154,3 +154,104 @@ impl SarifReport {
         }
     }
 }
+
+/// Format diagnostics as SARIF JSON string without printing.
+pub fn format(diagnostics: &[Diagnostic]) -> Result<String> {
+    let sarif = SarifReport::from_diagnostics(diagnostics);
+    Ok(serde_json::to_string_pretty(&sarif)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_diagnostic(rule_id: &'static str, severity: Severity) -> Diagnostic {
+        Diagnostic {
+            rule_id,
+            message: format!("Test message for {}", rule_id),
+            severity,
+            file_path: PathBuf::from("test.rs"),
+            line: 10,
+            column: 5,
+            end_line: None,
+            end_column: None,
+            suggestion: None,
+            fix: None,
+        }
+    }
+
+    #[test]
+    fn test_sarif_schema_version() {
+        let result = format(&[]).unwrap();
+        assert!(result.contains("sarif-schema-2.1.0.json"));
+        assert!(result.contains(r#""version": "2.1.0""#));
+    }
+
+    #[test]
+    fn test_sarif_tool_info() {
+        let result = format(&[]).unwrap();
+        assert!(result.contains(r#""name": "cargo-perf""#));
+        assert!(result.contains("github.com/cschuman/cargo-perf"));
+    }
+
+    #[test]
+    fn test_sarif_severity_mapping() {
+        let error = test_diagnostic("rule-e", Severity::Error);
+        let warning = test_diagnostic("rule-w", Severity::Warning);
+        let info = test_diagnostic("rule-i", Severity::Info);
+
+        let result = format(&[error, warning, info]).unwrap();
+
+        assert!(result.contains(r#""level": "error""#));
+        assert!(result.contains(r#""level": "warning""#));
+        assert!(result.contains(r#""level": "note""#));
+    }
+
+    #[test]
+    fn test_sarif_location_info() {
+        let diag = Diagnostic {
+            rule_id: "test-rule",
+            message: "Test".to_string(),
+            severity: Severity::Warning,
+            file_path: PathBuf::from("/path/to/file.rs"),
+            line: 42,
+            column: 8,
+            end_line: None,
+            end_column: None,
+            suggestion: None,
+            fix: None,
+        };
+
+        let result = format(&[diag]).unwrap();
+
+        assert!(result.contains("/path/to/file.rs"));
+        assert!(result.contains(r#""startLine": 42"#));
+        assert!(result.contains(r#""startColumn": 8"#));
+    }
+
+    #[test]
+    fn test_sarif_unique_rules() {
+        // Two diagnostics with same rule should only create one rule entry
+        let diag1 = test_diagnostic("same-rule", Severity::Warning);
+        let diag2 = test_diagnostic("same-rule", Severity::Warning);
+
+        let result = format(&[diag1, diag2]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        let rules = &parsed["runs"][0]["tool"]["driver"]["rules"];
+        assert_eq!(rules.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_sarif_valid_json() {
+        let diag = test_diagnostic("test-rule", Severity::Error);
+        let result = format(&[diag]).unwrap();
+
+        // Should parse as valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.is_object());
+        assert!(parsed.get("$schema").is_some());
+        assert!(parsed.get("runs").is_some());
+    }
+}

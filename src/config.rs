@@ -34,7 +34,7 @@ impl From<RuleSeverity> for Option<Severity> {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
     #[serde(default = "default_format")]
     pub format: String,
@@ -49,6 +49,15 @@ fn default_format() -> String {
 
 fn default_color() -> String {
     "auto".to_string()
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            format: default_format(),
+            color: default_color(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -132,10 +141,9 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.rules.is_empty());
-        // Note: Default derives from serde which uses field defaults
-        // When loaded via TOML, the default_* functions are called
-        // When using Config::default(), we get empty strings
-        assert!(config.output.format.is_empty() || config.output.format == "console");
+        // Both Config::default() and serde deserialization use the same defaults
+        assert_eq!(config.output.format, "console");
+        assert_eq!(config.output.color, "auto");
     }
 
     #[test]

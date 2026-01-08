@@ -58,20 +58,21 @@
 //! another-custom-rule = "deny"
 //! ```
 
-use crate::discovery::{discover_rust_files, DiscoveryOptions, MAX_FILE_SIZE};
-use crate::engine::AnalysisContext;
+use crate::discovery::{discover_rust_files, DiscoveryOptions};
+use crate::engine::{analyze_file_with_rules, AnalysisContext};
+use crate::error::Error;
 use crate::rules::{Diagnostic, Rule};
-use crate::suppression::SuppressionExtractor;
 use crate::Config;
 use rayon::prelude::*;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 
 /// A registry for managing both built-in and custom rules.
+///
+/// This registry reuses the static rule registry for built-in rules,
+/// avoiding duplication. Custom rules are stored separately and can
+/// override built-in rules with the same ID.
 ///
 /// # Example
 ///
@@ -83,8 +84,12 @@ use std::sync::Mutex;
 /// registry.add_rule(Box::new(MyCustomRule));
 /// ```
 pub struct PluginRegistry {
-    rules: Vec<Box<dyn Rule>>,
-    rule_index: HashMap<String, usize>,
+    /// Whether built-in rules from the static registry are included.
+    include_builtins: bool,
+    /// Custom rules (may override built-in rules).
+    custom_rules: Vec<Box<dyn Rule>>,
+    /// Index for O(1) lookup of custom rules by ID.
+    custom_index: HashMap<String, usize>,
 }
 
 impl Default for PluginRegistry {
@@ -97,50 +102,18 @@ impl PluginRegistry {
     /// Create an empty plugin registry.
     pub fn new() -> Self {
         Self {
-            rules: Vec::new(),
-            rule_index: HashMap::new(),
+            include_builtins: false,
+            custom_rules: Vec::new(),
+            custom_index: HashMap::new(),
         }
     }
 
     /// Add all built-in rules to the registry.
     ///
-    /// This creates new instances of each built-in rule and adds them to the registry.
+    /// This references the static rule registry rather than creating new instances,
+    /// avoiding memory duplication.
     pub fn add_builtin_rules(&mut self) {
-        use crate::rules::allocation_rules::{
-            FormatInLoopRule, MutexLockInLoopRule, StringConcatLoopRule, VecNoCapacityRule,
-        };
-        use crate::rules::async_rules::{
-            AsyncBlockInAsyncRule, UnboundedChannelRule, UnboundedSpawnRule,
-        };
-        use crate::rules::database_rules::NPlusOneQueryRule;
-        use crate::rules::iter_rules::CollectThenIterateRule;
-        use crate::rules::lock_across_await::LockAcrossAwaitRule;
-        use crate::rules::memory_rules::{CloneInLoopRule, RegexInLoopRule};
-
-        // Create new instances of each built-in rule
-        let builtin_rules: Vec<Box<dyn Rule>> = vec![
-            Box::new(AsyncBlockInAsyncRule),
-            Box::new(LockAcrossAwaitRule),
-            Box::new(UnboundedChannelRule),
-            Box::new(UnboundedSpawnRule),
-            Box::new(NPlusOneQueryRule),
-            Box::new(CloneInLoopRule),
-            Box::new(RegexInLoopRule),
-            Box::new(CollectThenIterateRule),
-            Box::new(VecNoCapacityRule),
-            Box::new(FormatInLoopRule),
-            Box::new(StringConcatLoopRule),
-            Box::new(MutexLockInLoopRule),
-        ];
-
-        for rule in builtin_rules {
-            let id = rule.id().to_string();
-            if let Entry::Vacant(entry) = self.rule_index.entry(id) {
-                let idx = self.rules.len();
-                entry.insert(idx);
-                self.rules.push(rule);
-            }
-        }
+        self.include_builtins = true;
     }
 
     /// Add a custom rule to the registry.
@@ -161,61 +134,118 @@ impl PluginRegistry {
 
     /// Try to add a custom rule to the registry.
     ///
-    /// Returns an error if a rule with the same ID already exists.
+    /// Returns an error if a rule with the same ID already exists in custom rules.
+    /// Note: This allows overriding built-in rules with custom implementations.
     /// Use [`add_or_replace_rule`] to replace existing rules without error.
     ///
     /// [`add_or_replace_rule`]: Self::add_or_replace_rule
     ///
     /// # Errors
     ///
-    /// Returns `Err` with the rejected rule if a rule with the same ID already exists.
+    /// Returns `Err` with the rejected rule if a custom rule with the same ID already exists.
     pub fn try_add_rule(&mut self, rule: Box<dyn Rule>) -> Result<(), Box<dyn Rule>> {
         let id = rule.id().to_string();
-        if self.rule_index.contains_key(&id) {
+        if self.custom_index.contains_key(&id) {
             return Err(rule);
         }
-        let idx = self.rules.len();
-        self.rule_index.insert(id, idx);
-        self.rules.push(rule);
+        let idx = self.custom_rules.len();
+        self.custom_index.insert(id, idx);
+        self.custom_rules.push(rule);
         Ok(())
     }
 
-    /// Add a custom rule, replacing any existing rule with the same ID.
+    /// Add a custom rule, replacing any existing custom rule with the same ID.
     pub fn add_or_replace_rule(&mut self, rule: Box<dyn Rule>) {
         let id = rule.id().to_string();
-        if let Some(&idx) = self.rule_index.get(&id) {
-            self.rules[idx] = rule;
+        if let Some(&idx) = self.custom_index.get(&id) {
+            self.custom_rules[idx] = rule;
         } else {
-            let idx = self.rules.len();
-            self.rule_index.insert(id, idx);
-            self.rules.push(rule);
+            let idx = self.custom_rules.len();
+            self.custom_index.insert(id, idx);
+            self.custom_rules.push(rule);
         }
     }
 
-    /// Get all registered rules.
-    pub fn rules(&self) -> &[Box<dyn Rule>] {
-        &self.rules
+    /// Get all registered rules as trait object references.
+    ///
+    /// Returns an iterator over all rules (built-in + custom).
+    /// Custom rules with the same ID as built-in rules will override them.
+    pub fn rules(&self) -> Vec<&dyn Rule> {
+        use crate::rules::registry;
+
+        let mut rules: Vec<&dyn Rule> = Vec::new();
+
+        // Add built-in rules (if enabled), skipping those overridden by custom rules
+        if self.include_builtins {
+            for rule in registry::all_rules() {
+                if !self.custom_index.contains_key(rule.id()) {
+                    rules.push(rule.as_ref());
+                }
+            }
+        }
+
+        // Add custom rules
+        for rule in &self.custom_rules {
+            rules.push(rule.as_ref());
+        }
+
+        rules
     }
 
     /// Get a rule by its ID.
+    ///
+    /// Custom rules take precedence over built-in rules.
     pub fn get_rule(&self, id: &str) -> Option<&dyn Rule> {
-        self.rule_index.get(id).map(|&idx| self.rules[idx].as_ref())
+        use crate::rules::registry;
+
+        // Check custom rules first (they override built-ins)
+        if let Some(&idx) = self.custom_index.get(id) {
+            return Some(self.custom_rules[idx].as_ref());
+        }
+
+        // Fall back to built-in rules
+        if self.include_builtins {
+            return registry::get_rule(id);
+        }
+
+        None
     }
 
     /// Check if a rule with the given ID exists.
     pub fn has_rule(&self, id: &str) -> bool {
-        self.rule_index.contains_key(id)
+        use crate::rules::registry;
+
+        self.custom_index.contains_key(id)
+            || (self.include_builtins && registry::has_rule(id))
     }
 
     /// Get all rule IDs.
-    pub fn rule_ids(&self) -> impl Iterator<Item = &str> {
-        self.rule_index.keys().map(|s| s.as_str())
+    pub fn rule_ids(&self) -> Vec<&str> {
+        use crate::rules::registry;
+
+        let mut ids: Vec<&str> = Vec::new();
+
+        // Add built-in rule IDs (if enabled), skipping overridden ones
+        if self.include_builtins {
+            for id in registry::rule_ids() {
+                if !self.custom_index.contains_key(id) {
+                    ids.push(id);
+                }
+            }
+        }
+
+        // Add custom rule IDs
+        for id in self.custom_index.keys() {
+            ids.push(id.as_str());
+        }
+
+        ids
     }
 
     /// Run all rules on the given analysis context.
     pub fn check_all(&self, ctx: &AnalysisContext) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
-        for rule in &self.rules {
+        for rule in self.rules() {
             diagnostics.extend(rule.check(ctx));
         }
         diagnostics
@@ -305,18 +335,20 @@ pub fn analyze_with_plugins(
     path: &Path,
     config: &Config,
     registry: &PluginRegistry,
-) -> Result<Vec<Diagnostic>, crate::error::Error> {
+) -> Result<Vec<Diagnostic>, Error> {
     // Use secure discovery (same as Engine) to prevent symlink attacks
     let files = discover_rust_files(path, &DiscoveryOptions::secure());
 
     // Track errors but don't fail the entire analysis
-    let errors: Mutex<Vec<(std::path::PathBuf, String)>> = Mutex::new(Vec::new());
+    let errors: Mutex<Vec<(std::path::PathBuf, Error)>> = Mutex::new(Vec::new());
 
-    // Analyze files in parallel (same as Engine)
+    // Analyze files in parallel using shared file analysis logic
     let all_diagnostics: Vec<Diagnostic> = files
         .par_iter()
         .flat_map(|file_path| {
-            match analyze_single_file_with_registry(file_path, config, registry) {
+            // Use shared analysis function with plugin registry rules
+            let rules = registry.rules().into_iter();
+            match analyze_file_with_rules(file_path, config, rules) {
                 Ok(diagnostics) => diagnostics,
                 Err(e) => {
                     // Log errors but continue analyzing other files
@@ -337,79 +369,6 @@ pub fn analyze_with_plugins(
     }
 
     Ok(all_diagnostics)
-}
-
-/// Analyze a single file with a custom plugin registry.
-/// Uses TOCTOU-safe file handling (same as Engine).
-fn analyze_single_file_with_registry(
-    file_path: &Path,
-    config: &Config,
-    registry: &PluginRegistry,
-) -> Result<Vec<Diagnostic>, String> {
-    // SECURITY: Use file descriptor to prevent TOCTOU attacks
-    // Open file once, verify via fd metadata, then read from same fd
-    let mut file = File::open(file_path).map_err(|e| e.to_string())?;
-
-    // Get metadata from the open file descriptor (not the path)
-    let metadata = file.metadata().map_err(|e| e.to_string())?;
-
-    // Verify it's still a regular file via the fd
-    if !metadata.is_file() {
-        return Err("not a regular file".to_string());
-    }
-
-    // Check file size via fd metadata
-    if metadata.len() > MAX_FILE_SIZE {
-        return Err(format!(
-            "file too large: {} bytes (max: {} bytes)",
-            metadata.len(),
-            MAX_FILE_SIZE
-        ));
-    }
-
-    // Read from the same file descriptor
-    let mut source = String::with_capacity(metadata.len() as usize);
-    file.read_to_string(&mut source).map_err(|e| e.to_string())?;
-
-    let ast = syn::parse_file(&source).map_err(|e| e.to_string())?;
-
-    let ctx = AnalysisContext::new(file_path, &source, &ast, config);
-    let suppressions = SuppressionExtractor::new(&source, &ast);
-
-    // Run all rules from the custom registry
-    let mut diagnostics = Vec::new();
-    for rule in registry.rules() {
-        // Check if rule is enabled in config (Some severity means enabled)
-        if config
-            .rule_severity(rule.id(), rule.default_severity())
-            .is_some()
-        {
-            // Catch panics in rule execution to prevent one bad rule from crashing analysis
-            // This is especially important for user-provided plugin rules
-            let rule_diagnostics = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                rule.check(&ctx)
-            })) {
-                Ok(diags) => diags,
-                Err(_) => {
-                    eprintln!(
-                        "Warning: Rule '{}' panicked while analyzing {}",
-                        rule.id(),
-                        file_path.display()
-                    );
-                    continue;
-                }
-            };
-
-            // Filter suppressed diagnostics
-            for diag in rule_diagnostics {
-                if !suppressions.is_suppressed(diag.rule_id, diag.line) {
-                    diagnostics.push(diag);
-                }
-            }
-        }
-    }
-
-    Ok(diagnostics)
 }
 
 /// A helper macro for defining custom rules more concisely.
@@ -560,7 +519,7 @@ mod tests {
         let mut registry = PluginRegistry::new();
         registry.add_rule(Box::new(TestRule));
 
-        let ids: Vec<_> = registry.rule_ids().collect();
+        let ids = registry.rule_ids();
         assert!(ids.contains(&"test-rule"));
     }
 }
