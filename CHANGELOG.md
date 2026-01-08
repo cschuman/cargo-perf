@@ -2,6 +2,12 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.5.5] - 2025-01-08
+
+### Fixed
+- Resolved all clippy warnings (question_mark, into_iter_on_ref, too_many_arguments)
+- Refactored `run_check` to use `CheckOptions` struct for cleaner API
+
 ## [0.5.4] - 2025-01-08
 
 ### Added

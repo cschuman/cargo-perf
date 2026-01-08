@@ -57,10 +57,7 @@ impl Fingerprint {
             .to_string();
 
         // Read the source line for hashing
-        let code_hash = match Self::hash_source_context(&diag.file_path, diag.line) {
-            Some(hash) => hash,
-            None => return None,
-        };
+        let code_hash = Self::hash_source_context(&diag.file_path, diag.line)?;
 
         Some(Fingerprint {
             rule_id: diag.rule_id.to_string(),

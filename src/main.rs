@@ -132,31 +132,29 @@ fn run() -> Result<()> {
 
     match cli.command {
         Some(Commands::Check { path, strict, timing, baseline }) => {
-            let strict_mode = strict || cli.strict;
-            let show_timing = timing || cli.timing;
-            run_check(
-                &path,
-                &config,
-                cli.format,
-                cli.min_severity,
-                cli.fail_on,
-                strict_mode,
-                show_timing,
-                baseline,
-            )
+            run_check(CheckOptions {
+                path: &path,
+                config: &config,
+                format: cli.format,
+                min_severity: cli.min_severity,
+                fail_on: cli.fail_on,
+                strict: strict || cli.strict,
+                show_timing: timing || cli.timing,
+                use_baseline: baseline,
+            })
         }
         None => {
             // Default to check with cli.path
-            run_check(
-                &cli.path,
-                &config,
-                cli.format,
-                cli.min_severity,
-                cli.fail_on,
-                cli.strict,
-                cli.timing,
-                false, // no baseline by default
-            )
+            run_check(CheckOptions {
+                path: &cli.path,
+                config: &config,
+                format: cli.format,
+                min_severity: cli.min_severity,
+                fail_on: cli.fail_on,
+                strict: cli.strict,
+                show_timing: cli.timing,
+                use_baseline: false,
+            })
         }
         Some(Commands::Baseline { path, update }) => run_baseline(&path, &config, update),
         Some(Commands::Fix {
@@ -185,35 +183,38 @@ fn run_lsp() -> Result<()> {
 /// High-confidence rules for strict mode
 const STRICT_RULES: &[&str] = &["async-block-in-async", "lock-across-await"];
 
-fn run_check(
-    path: &Path,
-    config: &Config,
+/// Options for the check command
+struct CheckOptions<'a> {
+    path: &'a Path,
+    config: &'a Config,
     format: OutputFormat,
     min_severity: cargo_perf::Severity,
     fail_on: Option<cargo_perf::Severity>,
     strict: bool,
     show_timing: bool,
     use_baseline: bool,
-) -> Result<()> {
+}
+
+fn run_check(opts: CheckOptions<'_>) -> Result<()> {
     use cargo_perf::Baseline;
 
     let start = Instant::now();
-    let diagnostics = analyze(path, config)?;
+    let diagnostics = analyze(opts.path, opts.config)?;
     let analysis_time = start.elapsed();
 
     // Filter by minimum severity and strict mode
     let mut diagnostics: Vec<_> = diagnostics
         .into_iter()
-        .filter(|d| d.severity >= min_severity)
-        .filter(|d| !strict || STRICT_RULES.contains(&d.rule_id))
+        .filter(|d| d.severity >= opts.min_severity)
+        .filter(|d| !opts.strict || STRICT_RULES.contains(&d.rule_id))
         .collect();
 
     // Filter by baseline if requested
-    let baseline_count = if use_baseline {
-        match Baseline::load(path) {
+    let baseline_count = if opts.use_baseline {
+        match Baseline::load(opts.path) {
             Ok(baseline) => {
                 let before = diagnostics.len();
-                diagnostics = baseline.filter(diagnostics, path);
+                diagnostics = baseline.filter(diagnostics, opts.path);
                 before - diagnostics.len()
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -229,7 +230,7 @@ fn run_check(
     };
 
     // Report
-    match format {
+    match opts.format {
         OutputFormat::Console => {
             cargo_perf::reporter::console::report(&diagnostics);
         }
@@ -242,19 +243,19 @@ fn run_check(
     }
 
     // Show timing information
-    if show_timing {
+    if opts.show_timing {
         use colored::Colorize;
         eprintln!();
         eprintln!("{}", "Timing:".bold());
         eprintln!("  Analysis time: {:?}", analysis_time);
         eprintln!("  Diagnostics:   {}", diagnostics.len());
-        if use_baseline && baseline_count > 0 {
+        if opts.use_baseline && baseline_count > 0 {
             eprintln!("  Baselined:     {} (filtered)", baseline_count);
         }
     }
 
     // Check fail condition
-    if let Some(fail_severity) = fail_on {
+    if let Some(fail_severity) = opts.fail_on {
         if diagnostics.iter().any(|d| d.severity >= fail_severity) {
             anyhow::bail!(
                 "Found {} diagnostic(s) at or above {:?} severity",
@@ -368,7 +369,7 @@ fn run_explain(rule_id: &str) -> Result<()> {
 
     // Find the rule
     let rule = registry::all_rules()
-        .into_iter()
+        .iter()
         .find(|r| r.id() == rule_id);
 
     let rule = match rule {
