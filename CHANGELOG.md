@@ -23,6 +23,10 @@ All notable changes to cargo-perf will be documented in this file.
   - Content-based fingerprinting: issues remain matched even if lines shift
   - Perfect for gradual adoption and CI pipelines
 
+### Documentation
+- Clarified auto-fix support: `collect-then-iterate` and `string-concat-loop` rules have auto-fix
+- LSP code actions provide quick-fix for rules with auto-fix capability
+
 ## [0.5.2] - 2025-01-07
 
 ### Fixed
