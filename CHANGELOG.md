@@ -2,6 +2,15 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.5.1] - 2025-01-07
+
+### Added
+- **GitHub Releases workflow**: Pre-built binaries for 6 targets on every release
+  - Linux: x86_64-gnu, x86_64-musl, aarch64-gnu
+  - macOS: x86_64, aarch64 (Apple Silicon)
+  - Windows: x86_64-msvc
+- SHA256 checksums for all release artifacts
+
 ## [0.5.0] - 2025-01-06
 
 ### Added
