@@ -2,6 +2,17 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.5.3] - 2025-01-08
+
+### Added
+- **`cargo perf explain <rule>`**: New command shows detailed rule documentation
+  - Why the pattern is problematic
+  - Bad vs Good code examples
+  - Performance impact with benchmark data
+  - Suppression syntax
+- **`--timing` flag**: Shows performance breakdown for analysis phases
+  - File discovery, parsing, analysis, and reporting times
+
 ## [0.5.2] - 2025-01-07
 
 ### Fixed
