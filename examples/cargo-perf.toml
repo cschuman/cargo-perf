@@ -1,0 +1,38 @@
+# cargo-perf configuration file
+# Place this file in your project root as `cargo-perf.toml`
+#
+# Schema: https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json
+# For IDE autocompletion with Taplo (VS Code, Neovim), add to your project:
+#   .taplo.toml with: [[rule]]
+#                     include = ["cargo-perf.toml"]
+#                     [rule.schema]
+#                     url = "https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json"
+
+[rules]
+# Configure severity: "deny" (error), "warn" (warning), "allow" (ignore)
+
+# Async rules - Critical for correctness
+async-block-in-async = "deny"   # Blocking calls in async functions
+lock-across-await = "deny"      # Mutex guards held across .await (deadlocks)
+unbounded-channel = "warn"      # Unbounded channels (memory exhaustion)
+unbounded-spawn = "warn"        # Task spawning in loops
+
+# Database rules
+n-plus-one-query = "warn"       # Database queries in loops
+
+# Loop optimization rules
+clone-in-hot-loop = "warn"      # .clone() in loops
+regex-in-loop = "warn"          # Regex::new() in loops (expensive)
+collect-then-iterate = "warn"   # .collect().iter() anti-pattern
+vec-no-capacity = "warn"        # Vec::new() without with_capacity
+format-in-loop = "warn"         # format!() allocations in loops
+string-concat-loop = "warn"     # String + in loops
+mutex-in-loop = "warn"          # Mutex::lock() in loops
+
+[output]
+format = "console"  # "console", "json", "sarif"
+color = "auto"      # "auto", "always", "never"
+
+[database]
+# Uncomment if using a specific ORM (improves n-plus-one-query detection)
+# orm = "sqlx"      # "sqlx", "diesel", "sea-orm"

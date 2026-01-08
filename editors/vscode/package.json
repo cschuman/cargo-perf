@@ -28,6 +28,12 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": "cargo-perf.json",
+        "url": "https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json"
+      }
+    ],
     "configuration": {
       "title": "cargo-perf",
       "properties": {

@@ -234,6 +234,24 @@ fn run_init(path: &Path) -> Result<()> {
     }
     std::fs::write(&config_path, Config::default_toml())?;
     println!("Created {}", config_path.display());
+
+    // Offer to create .taplo.toml for IDE schema support
+    let taplo_path = path.join(".taplo.toml");
+    if !taplo_path.exists() {
+        let taplo_config = r#"# Taplo configuration for cargo-perf.toml schema validation
+# Provides autocompletion in VS Code (Even Better TOML) and Neovim
+
+[[rule]]
+include = ["cargo-perf.toml"]
+
+[rule.schema]
+url = "https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json"
+"#;
+        std::fs::write(&taplo_path, taplo_config)?;
+        println!("Created {} (IDE schema support)", taplo_path.display());
+    }
+
+    println!("\nTip: Install 'Even Better TOML' (VS Code) or 'taplo' for autocompletion.");
     Ok(())
 }
 

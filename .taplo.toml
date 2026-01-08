@@ -1,0 +1,8 @@
+# Taplo configuration for cargo-perf.toml schema validation
+# Users can copy this file to their project root for IDE autocompletion
+
+[[rule]]
+include = ["cargo-perf.toml"]
+
+[rule.schema]
+url = "https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json"

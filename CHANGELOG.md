@@ -12,6 +12,10 @@ All notable changes to cargo-perf will be documented in this file.
   - Suppression syntax
 - **`--timing` flag**: Shows performance breakdown for analysis phases
   - File discovery, parsing, analysis, and reporting times
+- **JSON Schema for cargo-perf.toml**: IDE autocompletion and validation
+  - Schema URL: `https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json`
+  - `cargo perf init` now creates both config and `.taplo.toml` for schema support
+  - Works with VS Code (Even Better TOML), Neovim, and other Taplo-compatible editors
 
 ## [0.5.2] - 2025-01-07
 

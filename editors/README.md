@@ -182,3 +182,36 @@ cargo-perf is designed to complement rust-analyzer, not replace it. Most editors
 - **Neovim**: Configure both in lspconfig
 - **Emacs**: Set cargo-perf as an add-on LSP (`add-on? t`)
 - **Helix/Zed**: List both in language server configuration
+
+## Configuration File Schema
+
+cargo-perf provides a JSON schema for `cargo-perf.toml` to enable autocompletion in editors.
+
+### Quick Setup
+
+Run `cargo perf init` in your project to create both `cargo-perf.toml` and `.taplo.toml`.
+
+### Manual Setup
+
+1. Create `.taplo.toml` in your project root:
+
+```toml
+[[rule]]
+include = ["cargo-perf.toml"]
+
+[rule.schema]
+url = "https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json"
+```
+
+2. Install a TOML language server:
+   - **VS Code**: Install "Even Better TOML" extension
+   - **Neovim**: Use `taplo` with nvim-lspconfig
+   - **Emacs**: Use `taplo` with lsp-mode
+
+### What You Get
+
+With schema support, your editor will provide:
+- Autocompletion for all configuration options
+- Descriptions of each rule and setting
+- Validation of enum values (severity levels, output formats)
+- Error highlighting for invalid configuration

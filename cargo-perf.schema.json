@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json",
+  "title": "cargo-perf Configuration",
+  "description": "Configuration file for cargo-perf - Preventive performance analysis for Rust",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "rules": {
+      "type": "object",
+      "description": "Configure severity levels for individual rules",
+      "additionalProperties": false,
+      "properties": {
+        "async-block-in-async": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects blocking std calls (fs, thread::sleep) inside async functions"
+        },
+        "lock-across-await": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects MutexGuard/RwLockGuard held across .await points (causes deadlocks)"
+        },
+        "unbounded-channel": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects unbounded channels that can cause memory exhaustion"
+        },
+        "unbounded-spawn": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects task spawning in loops without backpressure"
+        },
+        "n-plus-one-query": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects database queries inside loops (N+1 query pattern)"
+        },
+        "clone-in-hot-loop": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects .clone() calls inside loops causing unnecessary allocations"
+        },
+        "regex-in-loop": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects Regex::new() inside loops; compile once with lazy_static"
+        },
+        "collect-then-iterate": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects .collect().iter() anti-pattern; iterate directly instead"
+        },
+        "vec-no-capacity": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects Vec::new() + push in loop without with_capacity"
+        },
+        "format-in-loop": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects format!() allocations inside loops"
+        },
+        "string-concat-loop": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects String + operator in loops; use push_str instead"
+        },
+        "mutex-in-loop": {
+          "$ref": "#/definitions/ruleSeverity",
+          "description": "Detects Mutex::lock() inside loops; hold lock outside loop"
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "description": "Configure output format and styling",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "description": "Output format for diagnostics",
+          "enum": ["console", "json", "sarif"],
+          "default": "console",
+          "enumDescriptions": [
+            "Human-readable console output with colors",
+            "Machine-readable JSON output",
+            "SARIF format for GitHub Actions integration"
+          ]
+        },
+        "color": {
+          "type": "string",
+          "description": "When to use colored output",
+          "enum": ["auto", "always", "never"],
+          "default": "auto",
+          "enumDescriptions": [
+            "Detect terminal capabilities automatically",
+            "Always use colored output",
+            "Never use colored output"
+          ]
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "description": "Configure database-related rule behavior",
+      "additionalProperties": false,
+      "properties": {
+        "orm": {
+          "type": "string",
+          "description": "ORM/database library used in this project (improves n-plus-one-query detection)",
+          "enum": ["sqlx", "diesel", "sea-orm"],
+          "enumDescriptions": [
+            "SQLx async database library",
+            "Diesel ORM",
+            "SeaORM async ORM"
+          ]
+        }
+      }
+    }
+  },
+  "definitions": {
+    "ruleSeverity": {
+      "type": "string",
+      "enum": ["deny", "warn", "allow"],
+      "default": "warn",
+      "description": "Severity level for this rule",
+      "enumDescriptions": [
+        "Treat as error (exit code 1)",
+        "Treat as warning (exit code 0)",
+        "Ignore this rule completely"
+      ]
+    }
+  }
+}

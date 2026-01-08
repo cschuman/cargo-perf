@@ -82,11 +82,13 @@ impl Config {
     /// Generate default TOML config
     pub fn default_toml() -> &'static str {
         r#"# cargo-perf configuration
-# See https://github.com/cschuman/cargo-perf for documentation
+# Schema: https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json
+# Docs: https://github.com/cschuman/cargo-perf
 
 [rules]
 # Set rule severity: "deny" (error), "warn" (warning), "allow" (ignore)
 # async-block-in-async = "deny"
+# lock-across-await = "deny"
 # clone-in-hot-loop = "warn"
 # vec-no-capacity = "allow"
 
@@ -95,7 +97,7 @@ format = "console"  # "console", "json", "sarif"
 color = "auto"      # "auto", "always", "never"
 
 [database]
-# orm = "sqlx"  # "diesel", "sqlx", "sea-orm"
+# orm = "sqlx"  # "sqlx", "diesel", "sea-orm"
 "#
     }
 }
