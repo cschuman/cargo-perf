@@ -2,6 +2,11 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.5.2] - 2025-01-07
+
+### Fixed
+- Release workflow Windows builds now use bash shell for consistent behavior
+
 ## [0.5.1] - 2025-01-07
 
 ### Added
