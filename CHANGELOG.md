@@ -10,6 +10,9 @@ All notable changes to cargo-perf will be documented in this file.
   - macOS: x86_64, aarch64 (Apple Silicon)
   - Windows: x86_64-msvc
 - SHA256 checksums for all release artifacts
+- **LSP code actions**: Quick-fix support for rules with auto-fix capability
+  - Diagnostics with fixes now show as lightbulb actions in IDE
+  - Works with `collect-then-iterate` rule (more coming)
 
 ## [0.5.0] - 2025-01-06
 

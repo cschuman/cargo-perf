@@ -3,7 +3,7 @@
 mod context;
 mod parser;
 
-pub use context::AnalysisContext;
+pub use context::{AnalysisContext, LineIndex};
 
 use crate::discovery::{discover_rust_files, DiscoveryOptions, MAX_FILE_SIZE};
 use crate::error::{Error, Result};

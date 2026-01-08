@@ -12,7 +12,7 @@
 //!
 //! - Real-time diagnostics on file save
 //! - Diagnostic severity mapping (errors, warnings)
-//! - Code action suggestions (coming soon)
+//! - Code actions with auto-fix support
 //!
 //! ## Editor Setup
 //!
@@ -50,13 +50,22 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use crate::{analyze, Config, Diagnostic as PerfDiagnostic, Severity as PerfSeverity};
+use crate::engine::LineIndex;
+use crate::{analyze, Config, Diagnostic as PerfDiagnostic, Fix, Severity as PerfSeverity};
 
 /// Maximum file size to analyze (10 MB)
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Minimum interval between analyses of the same file (debouncing)
 const MIN_ANALYSIS_INTERVAL_MS: u128 = 500;
+
+/// Stored diagnostic with its fix for code actions
+#[derive(Clone)]
+struct StoredDiagnostic {
+    lsp_diagnostic: tower_lsp::lsp_types::Diagnostic,
+    fix: Option<Fix>,
+    file_path: PathBuf,
+}
 
 /// The cargo-perf LSP server backend.
 pub struct Backend {
@@ -65,6 +74,8 @@ pub struct Backend {
     root_path: Arc<RwLock<Option<PathBuf>>>,
     /// Track last analysis time per file for rate limiting
     last_analysis: Arc<RwLock<HashMap<String, Instant>>>,
+    /// Store diagnostics with fixes for code actions
+    stored_diagnostics: Arc<RwLock<HashMap<Url, Vec<StoredDiagnostic>>>>,
 }
 
 impl Backend {
@@ -75,6 +86,7 @@ impl Backend {
             config: Arc::new(RwLock::new(Config::default())),
             root_path: Arc::new(RwLock::new(None)),
             last_analysis: Arc::new(RwLock::new(HashMap::new())),
+            stored_diagnostics: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -187,12 +199,28 @@ impl Backend {
             }
         };
 
-        // Convert to LSP diagnostics
-        let lsp_diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = diagnostics
-            .into_iter()
-            .filter(|d| d.file_path == canonical_path)
-            .map(perf_diag_to_lsp)
-            .collect();
+        // Convert to LSP diagnostics and store for code actions
+        let mut stored = Vec::new();
+        let mut lsp_diagnostics = Vec::new();
+
+        for diag in diagnostics.into_iter().filter(|d| d.file_path == canonical_path) {
+            let fix = diag.fix.clone();
+            let file_path = diag.file_path.clone();
+            let lsp_diag = perf_diag_to_lsp(diag);
+
+            stored.push(StoredDiagnostic {
+                lsp_diagnostic: lsp_diag.clone(),
+                fix,
+                file_path,
+            });
+            lsp_diagnostics.push(lsp_diag);
+        }
+
+        // Store diagnostics for code actions
+        {
+            let mut stored_map = self.stored_diagnostics.write().await;
+            stored_map.insert(uri.clone(), stored);
+        }
 
         self.client
             .publish_diagnostics(uri.clone(), lsp_diagnostics, None)
@@ -223,19 +251,37 @@ impl Backend {
         };
 
         // Group diagnostics by file
-        let mut by_file: HashMap<PathBuf, Vec<tower_lsp::lsp_types::Diagnostic>> = HashMap::new();
+        let mut by_file: HashMap<PathBuf, Vec<PerfDiagnostic>> = HashMap::new();
         for diag in diagnostics {
-            // Necessary clone: need both file_path for grouping and diag for conversion
-            // cargo-perf-ignore: clone-in-hot-loop
-            let file_path = diag.file_path.clone();
-            let lsp_diag = perf_diag_to_lsp(diag);
-            by_file.entry(file_path).or_default().push(lsp_diag);
+            by_file.entry(diag.file_path.clone()).or_default().push(diag);
         }
 
-        // Publish diagnostics for each file
+        // Publish and store diagnostics for each file
         for (path, diags) in by_file {
             if let Ok(uri) = Url::from_file_path(&path) {
-                self.client.publish_diagnostics(uri, diags, None).await;
+                let mut stored = Vec::new();
+                let mut lsp_diagnostics = Vec::new();
+
+                for diag in diags {
+                    let fix = diag.fix.clone();
+                    let file_path = diag.file_path.clone();
+                    let lsp_diag = perf_diag_to_lsp(diag);
+
+                    stored.push(StoredDiagnostic {
+                        lsp_diagnostic: lsp_diag.clone(),
+                        fix,
+                        file_path,
+                    });
+                    lsp_diagnostics.push(lsp_diag);
+                }
+
+                // Store for code actions
+                {
+                    let mut stored_map = self.stored_diagnostics.write().await;
+                    stored_map.insert(uri.clone(), stored);
+                }
+
+                self.client.publish_diagnostics(uri, lsp_diagnostics, None).await;
             }
         }
     }
@@ -276,6 +322,13 @@ impl LanguageServer for Backend {
                         ..Default::default()
                     },
                 )),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        resolve_provider: Some(false),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -311,11 +364,110 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        // Clear diagnostics when file is closed
+        // Clear diagnostics and stored data when file is closed
+        {
+            let mut stored = self.stored_diagnostics.write().await;
+            stored.remove(&params.text_document.uri);
+        }
         self.client
             .publish_diagnostics(params.text_document.uri, vec![], None)
             .await;
     }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let request_range = params.range;
+
+        // Get stored diagnostics for this file
+        let stored = self.stored_diagnostics.read().await;
+        let file_diagnostics = match stored.get(uri) {
+            Some(diags) => diags,
+            None => return Ok(None),
+        };
+
+        // Find diagnostics that overlap with the requested range and have fixes
+        let mut actions = Vec::new();
+
+        for stored_diag in file_diagnostics {
+            // Check if this diagnostic overlaps with the requested range
+            if !ranges_overlap(&stored_diag.lsp_diagnostic.range, &request_range) {
+                continue;
+            }
+
+            // Only create code action if there's a fix
+            let fix = match &stored_diag.fix {
+                Some(f) => f,
+                None => continue,
+            };
+
+            // Read file to build LineIndex for byte-to-position conversion
+            let source = match std::fs::read_to_string(&stored_diag.file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let line_index = LineIndex::new(&source);
+
+            // Build workspace edit from fix replacements
+            let mut text_edits = Vec::new();
+            for replacement in &fix.replacements {
+                let (start_line, start_col) = line_index.line_col(replacement.start_byte);
+                let (end_line, end_col) = line_index.line_col(replacement.end_byte);
+
+                text_edits.push(TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: start_line.saturating_sub(1) as u32,
+                            character: start_col.saturating_sub(1) as u32,
+                        },
+                        end: Position {
+                            line: end_line.saturating_sub(1) as u32,
+                            character: end_col.saturating_sub(1) as u32,
+                        },
+                    },
+                    new_text: replacement.new_text.clone(),
+                });
+            }
+
+            if text_edits.is_empty() {
+                continue;
+            }
+
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), text_edits);
+
+            let code_action = CodeAction {
+                title: fix.description.clone(),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![stored_diag.lsp_diagnostic.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                command: None,
+                is_preferred: Some(true),
+                disabled: None,
+                data: None,
+            };
+
+            actions.push(CodeActionOrCommand::CodeAction(code_action));
+        }
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
+    }
+}
+
+/// Check if two ranges overlap.
+fn ranges_overlap(a: &Range, b: &Range) -> bool {
+    // Ranges overlap if neither is entirely before or after the other
+    !(a.end.line < b.start.line
+        || (a.end.line == b.start.line && a.end.character < b.start.character)
+        || b.end.line < a.start.line
+        || (b.end.line == a.start.line && b.end.character < a.start.character))
 }
 
 /// Convert a cargo-perf diagnostic to an LSP diagnostic.
@@ -421,5 +573,41 @@ mod tests {
         assert_eq!(lsp_diag.range.start.character, 5);
         assert_eq!(lsp_diag.range.end.line, 11);
         assert_eq!(lsp_diag.range.end.character, 20);
+    }
+
+    #[test]
+    fn test_ranges_overlap() {
+        let range_a = Range {
+            start: Position { line: 5, character: 0 },
+            end: Position { line: 10, character: 0 },
+        };
+
+        // Overlapping range
+        let range_b = Range {
+            start: Position { line: 8, character: 0 },
+            end: Position { line: 12, character: 0 },
+        };
+        assert!(ranges_overlap(&range_a, &range_b));
+
+        // Non-overlapping range (before)
+        let range_c = Range {
+            start: Position { line: 0, character: 0 },
+            end: Position { line: 4, character: 0 },
+        };
+        assert!(!ranges_overlap(&range_a, &range_c));
+
+        // Non-overlapping range (after)
+        let range_d = Range {
+            start: Position { line: 11, character: 0 },
+            end: Position { line: 15, character: 0 },
+        };
+        assert!(!ranges_overlap(&range_a, &range_d));
+
+        // Contained range
+        let range_e = Range {
+            start: Position { line: 6, character: 0 },
+            end: Position { line: 8, character: 0 },
+        };
+        assert!(ranges_overlap(&range_a, &range_e));
     }
 }
