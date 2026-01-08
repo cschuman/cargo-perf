@@ -3,6 +3,7 @@ use cargo_perf::{analyze, Config};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "cargo-perf")]
@@ -35,6 +36,10 @@ struct Cli {
     /// Strict mode: only run high-confidence rules (async-block-in-async, lock-across-await)
     #[arg(long)]
     strict: bool,
+
+    /// Show timing information for performance debugging
+    #[arg(long)]
+    timing: bool,
 }
 
 #[derive(Subcommand)]
@@ -48,6 +53,10 @@ enum Commands {
         /// Strict mode: only run high-confidence rules
         #[arg(long)]
         strict: bool,
+
+        /// Show timing information
+        #[arg(long)]
+        timing: bool,
     },
     /// Apply auto-fixes for detected issues
     Fix {
@@ -103,8 +112,9 @@ fn run() -> Result<()> {
     let config = Config::load_or_default(&cli.path)?;
 
     match cli.command {
-        Some(Commands::Check { path, strict }) => {
+        Some(Commands::Check { path, strict, timing }) => {
             let strict_mode = strict || cli.strict;
+            let show_timing = timing || cli.timing;
             run_check(
                 &path,
                 &config,
@@ -112,6 +122,7 @@ fn run() -> Result<()> {
                 cli.min_severity,
                 cli.fail_on,
                 strict_mode,
+                show_timing,
             )
         }
         None => {
@@ -123,6 +134,7 @@ fn run() -> Result<()> {
                 cli.min_severity,
                 cli.fail_on,
                 cli.strict,
+                cli.timing,
             )
         }
         Some(Commands::Fix {
@@ -157,8 +169,11 @@ fn run_check(
     min_severity: cargo_perf::Severity,
     fail_on: Option<cargo_perf::Severity>,
     strict: bool,
+    show_timing: bool,
 ) -> Result<()> {
+    let start = Instant::now();
     let diagnostics = analyze(path, config)?;
+    let analysis_time = start.elapsed();
 
     // Filter by minimum severity and strict mode
     let diagnostics: Vec<_> = diagnostics
@@ -178,6 +193,15 @@ fn run_check(
         OutputFormat::Sarif => {
             cargo_perf::reporter::sarif::report(&diagnostics)?;
         }
+    }
+
+    // Show timing information
+    if show_timing {
+        use colored::Colorize;
+        eprintln!();
+        eprintln!("{}", "Timing:".bold());
+        eprintln!("  Analysis time: {:?}", analysis_time);
+        eprintln!("  Diagnostics:   {}", diagnostics.len());
     }
 
     // Check fail condition
