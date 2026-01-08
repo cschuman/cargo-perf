@@ -1,48 +1,35 @@
 # cargo-perf
 
-**Catch async bugs and performance anti-patterns that clippy misses.**
+**Static analysis for async correctness and runtime performance in Rust.**
 
 [![Crates.io](https://img.shields.io/crates/v/cargo-perf.svg)](https://crates.io/crates/cargo-perf)
 [![CI](https://github.com/cschuman/cargo-perf/actions/workflows/ci.yml/badge.svg)](https://github.com/cschuman/cargo-perf/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/cargo-perf.svg)](LICENSE)
 
-## What clippy doesn't catch
+## The Problem
 
-These bugs compile fine, pass clippy, and ship to production:
+These bugs compile fine and ship to production:
 
 ```rust
-// BUG: Blocks the async runtime — clippy won't catch this
+// Blocks the async runtime — causes timeouts under load
 async fn read_config() -> Config {
     let data = std::fs::read_to_string("config.toml").unwrap();
     toml::from_str(&data).unwrap()
 }
 
-// BUG: Deadlock — clippy won't catch this
+// Deadlock — holds lock across yield point
 async fn update(mutex: &tokio::sync::Mutex<Data>) {
     let guard = mutex.lock().await;
-    some_async_op().await; // guard still held across await!
+    some_async_op().await; // guard still held across await
 }
 
-// SLOW: 737x slower — clippy's coverage is limited
+// 737x slower — regex compilation in hot loop
 for line in lines {
     if Regex::new(r"\d+").unwrap().is_match(line) { ... }
 }
 ```
 
-**cargo-perf catches all of these.**
-
-## How it's different from clippy
-
-| | clippy | cargo-perf |
-|---|--------|------------|
-| **Purpose** | General code quality (style, correctness, complexity) | Async correctness + loop performance |
-| **Blocking calls in async** | No | Yes |
-| **Lock guards across await** | No | Yes |
-| **N+1 query detection** | No | Yes |
-| **Loop allocation patterns** | Limited | Comprehensive |
-| **Scope** | 700+ lints | 12 focused rules |
-
-**Use both:** `cargo clippy && cargo perf`
+cargo-perf catches all of these.
 
 ## Installation
 
