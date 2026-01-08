@@ -59,6 +59,12 @@ const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// Minimum interval between analyses of the same file (debouncing)
 const MIN_ANALYSIS_INTERVAL_MS: u128 = 500;
 
+/// Maximum entries in rate-limit cache before cleanup
+const MAX_RATE_LIMIT_ENTRIES: usize = 1000;
+
+/// Age after which rate-limit entries are considered stale (5 minutes)
+const RATE_LIMIT_STALE_SECS: u64 = 300;
+
 /// Stored diagnostic with its fix for code actions
 #[derive(Clone)]
 struct StoredDiagnostic {
@@ -128,7 +134,14 @@ impl Backend {
     /// Record that analysis was performed for a file.
     async fn record_analysis(&self, uri_str: String) {
         let mut last_analysis = self.last_analysis.write().await;
-        last_analysis.insert(uri_str, Instant::now());
+        let now = Instant::now();
+        last_analysis.insert(uri_str, now);
+
+        // Cleanup if cache exceeds limit: remove stale entries
+        if last_analysis.len() > MAX_RATE_LIMIT_ENTRIES {
+            let stale_threshold = std::time::Duration::from_secs(RATE_LIMIT_STALE_SECS);
+            last_analysis.retain(|_, instant| instant.elapsed() < stale_threshold);
+        }
     }
 
     /// Analyze a document and publish diagnostics.
@@ -154,8 +167,13 @@ impl Backend {
             }
         };
 
-        // SECURITY: Check file size before analysis (DoS prevention)
-        match std::fs::metadata(&canonical_path) {
+        // SECURITY: Open file immediately after validation to reduce TOCTOU window
+        // Get metadata from open file handle, not path (prevents race condition)
+        let file = match std::fs::File::open(&canonical_path) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        match file.metadata() {
             Ok(meta) => {
                 if meta.len() > MAX_FILE_SIZE {
                     self.client
@@ -173,6 +191,10 @@ impl Backend {
             }
             Err(_) => return,
         }
+        // Drop file handle before analyze (which will re-open)
+        // Note: This reduces but doesn't eliminate TOCTOU - full fix would require
+        // passing file content to analyze(), which is a larger refactor
+        drop(file);
 
         // Rate limiting: debounce rapid re-analysis requests
         let uri_str = uri.to_string();

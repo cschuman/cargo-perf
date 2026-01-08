@@ -726,8 +726,10 @@ fn run_fix(path: &Path, config: &Config, dry_run: bool, rules_filter: Option<&st
         return Ok(());
     }
 
-    // Apply fixes
-    let base_dir = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // Apply fixes - canonicalize path for security (no fallback to prevent traversal attacks)
+    let base_dir = path
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Cannot canonicalize path '{}': {}", path.display(), e))?;
     match apply_fixes(&diagnostics, &base_dir) {
         Ok(count) => {
             println!("\n{}", format!("Applied {} fix(es).", count).green());

@@ -58,14 +58,18 @@
 //! another-custom-rule = "deny"
 //! ```
 
-use crate::discovery::{discover_rust_files, DiscoveryOptions};
+use crate::discovery::{discover_rust_files, DiscoveryOptions, MAX_FILE_SIZE};
 use crate::engine::AnalysisContext;
 use crate::rules::{Diagnostic, Rule};
 use crate::suppression::SuppressionExtractor;
 use crate::Config;
+use rayon::prelude::*;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
+use std::sync::Mutex;
 
 /// A registry for managing both built-in and custom rules.
 ///
@@ -302,43 +306,110 @@ pub fn analyze_with_plugins(
     config: &Config,
     registry: &PluginRegistry,
 ) -> Result<Vec<Diagnostic>, crate::error::Error> {
-    let files = discover_rust_files(path, &DiscoveryOptions::fast());
-    // cargo-perf-ignore: vec-no-capacity
-    let mut all_diagnostics = Vec::new();
+    // Use secure discovery (same as Engine) to prevent symlink attacks
+    let files = discover_rust_files(path, &DiscoveryOptions::secure());
 
-    for file_path in files {
-        let source = match std::fs::read_to_string(&file_path) {
-            Ok(s) => s,
-            Err(_) => continue, // Skip files that can't be read
-        };
-        let ast = match syn::parse_file(&source) {
-            Ok(ast) => ast,
-            Err(_) => continue, // Skip files that don't parse
-        };
+    // Track errors but don't fail the entire analysis
+    let errors: Mutex<Vec<(std::path::PathBuf, String)>> = Mutex::new(Vec::new());
 
-        let ctx = AnalysisContext::new(&file_path, &source, &ast, config);
-        let suppressions = SuppressionExtractor::new(&source, &ast);
-
-        // Run all rules from the custom registry
-        for rule in registry.rules() {
-            // Check if rule is enabled in config (Some severity means enabled)
-            if config
-                .rule_severity(rule.id(), rule.default_severity())
-                .is_some()
-            {
-                let diagnostics = rule.check(&ctx);
-
-                // Filter suppressed diagnostics
-                for diag in diagnostics {
-                    if !suppressions.is_suppressed(diag.rule_id, diag.line) {
-                        all_diagnostics.push(diag);
+    // Analyze files in parallel (same as Engine)
+    let all_diagnostics: Vec<Diagnostic> = files
+        .par_iter()
+        .flat_map(|file_path| {
+            match analyze_single_file_with_registry(file_path, config, registry) {
+                Ok(diagnostics) => diagnostics,
+                Err(e) => {
+                    // Log errors but continue analyzing other files
+                    if let Ok(mut errs) = errors.lock() {
+                        errs.push((file_path.clone(), e));
                     }
+                    Vec::new()
+                }
+            }
+        })
+        .collect();
+
+    // Report errors at the end (same as Engine)
+    if let Ok(errs) = errors.lock() {
+        for (path, error) in errs.iter() {
+            eprintln!("Warning: Failed to analyze {}: {}", path.display(), error);
+        }
+    }
+
+    Ok(all_diagnostics)
+}
+
+/// Analyze a single file with a custom plugin registry.
+/// Uses TOCTOU-safe file handling (same as Engine).
+fn analyze_single_file_with_registry(
+    file_path: &Path,
+    config: &Config,
+    registry: &PluginRegistry,
+) -> Result<Vec<Diagnostic>, String> {
+    // SECURITY: Use file descriptor to prevent TOCTOU attacks
+    // Open file once, verify via fd metadata, then read from same fd
+    let mut file = File::open(file_path).map_err(|e| e.to_string())?;
+
+    // Get metadata from the open file descriptor (not the path)
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+
+    // Verify it's still a regular file via the fd
+    if !metadata.is_file() {
+        return Err("not a regular file".to_string());
+    }
+
+    // Check file size via fd metadata
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(format!(
+            "file too large: {} bytes (max: {} bytes)",
+            metadata.len(),
+            MAX_FILE_SIZE
+        ));
+    }
+
+    // Read from the same file descriptor
+    let mut source = String::with_capacity(metadata.len() as usize);
+    file.read_to_string(&mut source).map_err(|e| e.to_string())?;
+
+    let ast = syn::parse_file(&source).map_err(|e| e.to_string())?;
+
+    let ctx = AnalysisContext::new(file_path, &source, &ast, config);
+    let suppressions = SuppressionExtractor::new(&source, &ast);
+
+    // Run all rules from the custom registry
+    let mut diagnostics = Vec::new();
+    for rule in registry.rules() {
+        // Check if rule is enabled in config (Some severity means enabled)
+        if config
+            .rule_severity(rule.id(), rule.default_severity())
+            .is_some()
+        {
+            // Catch panics in rule execution to prevent one bad rule from crashing analysis
+            // This is especially important for user-provided plugin rules
+            let rule_diagnostics = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rule.check(&ctx)
+            })) {
+                Ok(diags) => diags,
+                Err(_) => {
+                    eprintln!(
+                        "Warning: Rule '{}' panicked while analyzing {}",
+                        rule.id(),
+                        file_path.display()
+                    );
+                    continue;
+                }
+            };
+
+            // Filter suppressed diagnostics
+            for diag in rule_diagnostics {
+                if !suppressions.is_suppressed(diag.rule_id, diag.line) {
+                    diagnostics.push(diag);
                 }
             }
         }
     }
 
-    Ok(all_diagnostics)
+    Ok(diagnostics)
 }
 
 /// A helper macro for defining custom rules more concisely.

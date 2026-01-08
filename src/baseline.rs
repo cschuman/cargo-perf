@@ -23,12 +23,10 @@
 //! - The rule ID changes
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::Diagnostic;
 
@@ -66,6 +64,32 @@ impl Fingerprint {
         })
     }
 
+    /// Create a fingerprint from a diagnostic using cached file content.
+    ///
+    /// This is more efficient when processing multiple diagnostics from
+    /// the same file, as the file content is read once and reused.
+    pub fn from_diagnostic_with_cache(
+        diag: &Diagnostic,
+        root: &Path,
+        lines: &[&str],
+    ) -> Option<Self> {
+        let file_path = diag
+            .file_path
+            .strip_prefix(root)
+            .unwrap_or(&diag.file_path)
+            .to_string_lossy()
+            .to_string();
+
+        // Use cached lines for hashing
+        let code_hash = Self::hash_source_context_with_cache(lines, diag.line)?;
+
+        Some(Fingerprint {
+            rule_id: diag.rule_id.to_string(),
+            file_path,
+            code_hash,
+        })
+    }
+
     /// Hash the source code around a specific line
     fn hash_source_context(file_path: &Path, line: usize) -> Option<u64> {
         let file = fs::File::open(file_path).ok()?;
@@ -95,12 +119,45 @@ impl Fingerprint {
         Some(Self::stable_hash(&context))
     }
 
-    /// A stable string hash that won't change between runs
+    /// A stable string hash using FNV-1a algorithm.
+    /// This is guaranteed stable across Rust versions and platforms.
     fn stable_hash(s: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        s.hash(&mut hasher);
-        hasher.finish()
+        // FNV-1a constants for 64-bit
+        const FNV_OFFSET: u64 = 14695981039346656037;
+        const FNV_PRIME: u64 = 1099511628211;
+
+        let mut hash = FNV_OFFSET;
+        for byte in s.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    /// Hash source context with cached file content
+    pub(crate) fn hash_source_context_with_cache(
+        lines: &[&str],
+        target_line: usize,
+    ) -> Option<u64> {
+        if target_line == 0 || target_line > lines.len() {
+            return None;
+        }
+
+        // Get 3 lines of context: line-1, line, line+1 (1-indexed)
+        let start = target_line.saturating_sub(2); // Convert to 0-indexed, go back 1
+        let end = (target_line).min(lines.len()); // target_line is 1-indexed, so this is line+1 in 0-indexed
+
+        let mut context = String::new();
+        for line in &lines[start..end] {
+            context.push_str(line.trim());
+            context.push('\n');
+        }
+
+        if context.is_empty() {
+            return None;
+        }
+
+        Some(Self::stable_hash(&context))
     }
 }
 
@@ -204,20 +261,92 @@ impl Baseline {
     }
 
     /// Create a baseline from a list of diagnostics
+    ///
+    /// This method uses file caching to avoid re-reading the same file
+    /// when multiple diagnostics come from the same source file.
     pub fn from_diagnostics(diagnostics: &[Diagnostic], root: &Path) -> Self {
         let mut baseline = Baseline::new();
+
+        // Group diagnostics by file path for efficient caching
+        let mut by_file: HashMap<&PathBuf, Vec<&Diagnostic>> = HashMap::new();
         for diag in diagnostics {
-            baseline.add(diag, root);
+            by_file.entry(&diag.file_path).or_default().push(diag);
         }
+
+        // Process each file once, caching its content
+        for (file_path, file_diagnostics) in by_file {
+            // Read file once and cache lines
+            let source = match fs::read_to_string(file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let lines: Vec<&str> = source.lines().collect();
+
+            for diag in file_diagnostics {
+                if let Some(fingerprint) =
+                    Fingerprint::from_diagnostic_with_cache(diag, root, &lines)
+                {
+                    if !baseline.fingerprints.contains(&fingerprint) {
+                        let entry = BaselineEntry {
+                            fingerprint: fingerprint.clone(),
+                            description: format!(
+                                "{}: {} ({}:{})",
+                                diag.rule_id,
+                                diag.message,
+                                diag.file_path.display(),
+                                diag.line
+                            ),
+                            added: Some(chrono_lite_now()),
+                        };
+                        baseline.entries.push(entry);
+                        baseline.fingerprints.insert(fingerprint);
+                    }
+                }
+            }
+        }
+
         baseline
     }
 
     /// Filter diagnostics, removing those in the baseline
+    ///
+    /// This method uses file caching to avoid re-reading the same file
+    /// when checking multiple diagnostics from the same source file.
     pub fn filter(&self, diagnostics: Vec<Diagnostic>, root: &Path) -> Vec<Diagnostic> {
-        diagnostics
-            .into_iter()
-            .filter(|d| !self.contains(d, root))
-            .collect()
+        // Group diagnostics by file path for efficient caching
+        let mut by_file: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
+        for diag in diagnostics {
+            by_file.entry(diag.file_path.clone()).or_default().push(diag);
+        }
+
+        let mut result = Vec::new();
+
+        // Process each file once, caching its content
+        for (file_path, file_diagnostics) in by_file {
+            // Read file once and cache lines
+            let source = match fs::read_to_string(&file_path) {
+                Ok(s) => s,
+                Err(_) => {
+                    // Can't read file, keep all diagnostics from it
+                    result.extend(file_diagnostics);
+                    continue;
+                }
+            };
+            let lines: Vec<&str> = source.lines().collect();
+
+            for diag in file_diagnostics {
+                if let Some(fp) = Fingerprint::from_diagnostic_with_cache(&diag, root, &lines) {
+                    if !self.fingerprints.contains(&fp) {
+                        result.push(diag);
+                    }
+                } else {
+                    // Can't fingerprint, keep the diagnostic
+                    result.push(diag);
+                }
+            }
+        }
+
+        result
     }
 
     /// Number of entries in the baseline

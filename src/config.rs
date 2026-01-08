@@ -58,8 +58,29 @@ pub struct DatabaseConfig {
 
 impl Config {
     /// Load config from cargo-perf.toml in the given path, or return default
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the project directory containing cargo-perf.toml
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path doesn't exist or if the config file
+    /// exists but cannot be parsed.
     pub fn load_or_default(path: &Path) -> anyhow::Result<Self> {
-        let config_path = path.join("cargo-perf.toml");
+        // Validate path exists
+        if !path.exists() {
+            anyhow::bail!("Path does not exist: {}", path.display());
+        }
+
+        // If path is a file, use its parent directory for config lookup
+        let dir_path = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+
+        let config_path = dir_path.join("cargo-perf.toml");
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
             let config: Config = toml::from_str(&content)?;
@@ -99,5 +120,119 @@ color = "auto"      # "auto", "always", "never"
 [database]
 # orm = "sqlx"  # "sqlx", "diesel", "sea-orm"
 "#
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert!(config.rules.is_empty());
+        // Note: Default derives from serde which uses field defaults
+        // When loaded via TOML, the default_* functions are called
+        // When using Config::default(), we get empty strings
+        assert!(config.output.format.is_empty() || config.output.format == "console");
+    }
+
+    #[test]
+    fn test_rule_severity_default() {
+        let config = Config::default();
+        // Should return default when not configured
+        assert_eq!(
+            config.rule_severity("unknown-rule", Severity::Warning),
+            Some(Severity::Warning)
+        );
+    }
+
+    #[test]
+    fn test_rule_severity_deny() {
+        let mut config = Config::default();
+        config.rules.insert("test-rule".to_string(), RuleSeverity::Deny);
+        assert_eq!(
+            config.rule_severity("test-rule", Severity::Warning),
+            Some(Severity::Error)
+        );
+    }
+
+    #[test]
+    fn test_rule_severity_allow() {
+        let mut config = Config::default();
+        config.rules.insert("test-rule".to_string(), RuleSeverity::Allow);
+        assert_eq!(
+            config.rule_severity("test-rule", Severity::Warning),
+            None
+        );
+    }
+
+    #[test]
+    fn test_load_or_default_nonexistent_path() {
+        let result = Config::load_or_default(Path::new("/nonexistent/path"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_or_default_no_config_file() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config::load_or_default(tmp.path()).unwrap();
+        assert!(config.rules.is_empty());
+    }
+
+    #[test]
+    fn test_load_or_default_with_config_file() {
+        let tmp = TempDir::new().unwrap();
+        let config_content = r#"
+[rules]
+async-block-in-async = "deny"
+clone-in-hot-loop = "allow"
+"#;
+        std::fs::write(tmp.path().join("cargo-perf.toml"), config_content).unwrap();
+
+        let config = Config::load_or_default(tmp.path()).unwrap();
+        assert_eq!(
+            config.rule_severity("async-block-in-async", Severity::Warning),
+            Some(Severity::Error)
+        );
+        assert_eq!(
+            config.rule_severity("clone-in-hot-loop", Severity::Warning),
+            None
+        );
+    }
+
+    #[test]
+    fn test_load_or_default_with_file_path() {
+        let tmp = TempDir::new().unwrap();
+        let config_content = r#"
+[rules]
+test-rule = "warn"
+"#;
+        std::fs::write(tmp.path().join("cargo-perf.toml"), config_content).unwrap();
+        let file_path = tmp.path().join("some_file.rs");
+        std::fs::write(&file_path, "").unwrap();
+
+        // Should find config from parent directory when given a file
+        let config = Config::load_or_default(&file_path).unwrap();
+        assert_eq!(
+            config.rule_severity("test-rule", Severity::Error),
+            Some(Severity::Warning)
+        );
+    }
+
+    #[test]
+    fn test_load_invalid_config() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("cargo-perf.toml"), "invalid { toml").unwrap();
+        let result = Config::load_or_default(tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_severity_from_conversion() {
+        assert_eq!(Option::<Severity>::from(RuleSeverity::Deny), Some(Severity::Error));
+        assert_eq!(Option::<Severity>::from(RuleSeverity::Warn), Some(Severity::Warning));
+        assert_eq!(Option::<Severity>::from(RuleSeverity::Allow), None);
     }
 }

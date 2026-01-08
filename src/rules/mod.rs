@@ -44,6 +44,10 @@ impl std::str::FromStr for Severity {
     }
 }
 
+// CLI integration is only needed for the binary, not library users.
+// This impl is always available since clap is a required dependency,
+// but library users who don't need CLI can ignore it.
+#[cfg(feature = "cli")]
 impl clap::ValueEnum for Severity {
     fn value_variants<'a>() -> &'a [Self] {
         &[Severity::Info, Severity::Warning, Severity::Error]

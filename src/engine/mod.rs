@@ -121,7 +121,20 @@ impl<'a> Engine<'a> {
                 continue;
             }
 
-            let rule_diagnostics = rule.check(&ctx);
+            // Catch panics in rule execution to prevent one bad rule from crashing analysis
+            let rule_diagnostics = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rule.check(&ctx)
+            })) {
+                Ok(diags) => diags,
+                Err(_) => {
+                    eprintln!(
+                        "Warning: Rule '{}' panicked while analyzing {}",
+                        rule.id(),
+                        file_path.display()
+                    );
+                    continue;
+                }
+            };
 
             // Filter out suppressed diagnostics
             for diag in rule_diagnostics {
