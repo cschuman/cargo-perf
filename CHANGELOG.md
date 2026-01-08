@@ -2,7 +2,7 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
-## [0.5.3] - 2025-01-08
+## [0.5.4] - 2025-01-08
 
 ### Added
 - **`cargo perf explain <rule>`**: New command shows detailed rule documentation
