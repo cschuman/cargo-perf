@@ -89,6 +89,7 @@
 //! let x = data.clone();
 //! ```
 
+pub mod baseline;
 pub mod config;
 pub mod discovery;
 pub mod engine;
@@ -101,6 +102,7 @@ pub mod reporter;
 pub mod rules;
 pub mod suppression;
 
+pub use baseline::Baseline;
 pub use config::Config;
 pub use engine::{AnalysisContext, Engine};
 pub use error::{Error, Result};

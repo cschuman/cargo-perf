@@ -57,6 +57,20 @@ enum Commands {
         /// Show timing information
         #[arg(long)]
         timing: bool,
+
+        /// Use baseline file to filter known issues
+        #[arg(long)]
+        baseline: bool,
+    },
+    /// Create or update baseline file with current diagnostics
+    Baseline {
+        /// Path to analyze
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Update existing baseline instead of replacing
+        #[arg(long)]
+        update: bool,
     },
     /// Apply auto-fixes for detected issues
     Fix {
@@ -117,7 +131,7 @@ fn run() -> Result<()> {
     let config = Config::load_or_default(&cli.path)?;
 
     match cli.command {
-        Some(Commands::Check { path, strict, timing }) => {
+        Some(Commands::Check { path, strict, timing, baseline }) => {
             let strict_mode = strict || cli.strict;
             let show_timing = timing || cli.timing;
             run_check(
@@ -128,6 +142,7 @@ fn run() -> Result<()> {
                 cli.fail_on,
                 strict_mode,
                 show_timing,
+                baseline,
             )
         }
         None => {
@@ -140,8 +155,10 @@ fn run() -> Result<()> {
                 cli.fail_on,
                 cli.strict,
                 cli.timing,
+                false, // no baseline by default
             )
         }
+        Some(Commands::Baseline { path, update }) => run_baseline(&path, &config, update),
         Some(Commands::Fix {
             path,
             dry_run,
@@ -176,17 +193,40 @@ fn run_check(
     fail_on: Option<cargo_perf::Severity>,
     strict: bool,
     show_timing: bool,
+    use_baseline: bool,
 ) -> Result<()> {
+    use cargo_perf::Baseline;
+
     let start = Instant::now();
     let diagnostics = analyze(path, config)?;
     let analysis_time = start.elapsed();
 
     // Filter by minimum severity and strict mode
-    let diagnostics: Vec<_> = diagnostics
+    let mut diagnostics: Vec<_> = diagnostics
         .into_iter()
         .filter(|d| d.severity >= min_severity)
         .filter(|d| !strict || STRICT_RULES.contains(&d.rule_id))
         .collect();
+
+    // Filter by baseline if requested
+    let baseline_count = if use_baseline {
+        match Baseline::load(path) {
+            Ok(baseline) => {
+                let before = diagnostics.len();
+                diagnostics = baseline.filter(diagnostics, path);
+                before - diagnostics.len()
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("Warning: No baseline file found. Run `cargo perf baseline` to create one.");
+                0
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to load baseline: {}", e);
+            }
+        }
+    } else {
+        0
+    };
 
     // Report
     match format {
@@ -208,6 +248,9 @@ fn run_check(
         eprintln!("{}", "Timing:".bold());
         eprintln!("  Analysis time: {:?}", analysis_time);
         eprintln!("  Diagnostics:   {}", diagnostics.len());
+        if use_baseline && baseline_count > 0 {
+            eprintln!("  Baselined:     {} (filtered)", baseline_count);
+        }
     }
 
     // Check fail condition
@@ -223,6 +266,54 @@ fn run_check(
             );
         }
     }
+
+    Ok(())
+}
+
+fn run_baseline(path: &Path, config: &Config, update: bool) -> Result<()> {
+    use cargo_perf::baseline::BASELINE_FILENAME;
+    use cargo_perf::Baseline;
+    use colored::Colorize;
+
+    // Run analysis
+    let diagnostics = analyze(path, config)?;
+
+    if diagnostics.is_empty() {
+        println!("No diagnostics to baseline.");
+        return Ok(());
+    }
+
+    // Load existing baseline if updating
+    let mut baseline = if update {
+        match Baseline::load(path) {
+            Ok(b) => {
+                println!("Updating existing baseline with {} entries...", b.len());
+                b
+            }
+            Err(_) => Baseline::new(),
+        }
+    } else {
+        Baseline::new()
+    };
+
+    // Add diagnostics
+    let before = baseline.len();
+    for diag in &diagnostics {
+        baseline.add(diag, path);
+    }
+    let added = baseline.len() - before;
+
+    // Save
+    baseline.save(path)?;
+
+    println!("{}", "Baseline created:".green().bold());
+    println!("  File:    {}", path.join(BASELINE_FILENAME).display());
+    println!("  Total:   {} entries", baseline.len());
+    if update {
+        println!("  Added:   {} new entries", added);
+    }
+    println!();
+    println!("Use `cargo perf check --baseline` to filter these issues.");
 
     Ok(())
 }

@@ -16,6 +16,12 @@ All notable changes to cargo-perf will be documented in this file.
   - Schema URL: `https://raw.githubusercontent.com/cschuman/cargo-perf/main/cargo-perf.schema.json`
   - `cargo perf init` now creates both config and `.taplo.toml` for schema support
   - Works with VS Code (Even Better TOML), Neovim, and other Taplo-compatible editors
+- **Baseline file support**: Track known issues without noise
+  - `cargo perf baseline` - Create baseline from current diagnostics
+  - `cargo perf baseline --update` - Add new issues to existing baseline
+  - `cargo perf check --baseline` - Filter out baselined issues
+  - Content-based fingerprinting: issues remain matched even if lines shift
+  - Perfect for gradual adoption and CI pipelines
 
 ## [0.5.2] - 2025-01-07
 
