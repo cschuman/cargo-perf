@@ -159,7 +159,9 @@ mod tests {
     #[test]
     fn test_rule_severity_deny() {
         let mut config = Config::default();
-        config.rules.insert("test-rule".to_string(), RuleSeverity::Deny);
+        config
+            .rules
+            .insert("test-rule".to_string(), RuleSeverity::Deny);
         assert_eq!(
             config.rule_severity("test-rule", Severity::Warning),
             Some(Severity::Error)
@@ -169,11 +171,10 @@ mod tests {
     #[test]
     fn test_rule_severity_allow() {
         let mut config = Config::default();
-        config.rules.insert("test-rule".to_string(), RuleSeverity::Allow);
-        assert_eq!(
-            config.rule_severity("test-rule", Severity::Warning),
-            None
-        );
+        config
+            .rules
+            .insert("test-rule".to_string(), RuleSeverity::Allow);
+        assert_eq!(config.rule_severity("test-rule", Severity::Warning), None);
     }
 
     #[test]
@@ -239,8 +240,14 @@ test-rule = "warn"
 
     #[test]
     fn test_rule_severity_from_conversion() {
-        assert_eq!(Option::<Severity>::from(RuleSeverity::Deny), Some(Severity::Error));
-        assert_eq!(Option::<Severity>::from(RuleSeverity::Warn), Some(Severity::Warning));
+        assert_eq!(
+            Option::<Severity>::from(RuleSeverity::Deny),
+            Some(Severity::Error)
+        );
+        assert_eq!(
+            Option::<Severity>::from(RuleSeverity::Warn),
+            Some(Severity::Warning)
+        );
         assert_eq!(Option::<Severity>::from(RuleSeverity::Allow), None);
     }
 }

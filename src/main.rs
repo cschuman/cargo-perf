@@ -131,18 +131,21 @@ fn run() -> Result<()> {
     let config = Config::load_or_default(&cli.path)?;
 
     match cli.command {
-        Some(Commands::Check { path, strict, timing, baseline }) => {
-            run_check(CheckOptions {
-                path: &path,
-                config: &config,
-                format: cli.format,
-                min_severity: cli.min_severity,
-                fail_on: cli.fail_on,
-                strict: strict || cli.strict,
-                show_timing: timing || cli.timing,
-                use_baseline: baseline,
-            })
-        }
+        Some(Commands::Check {
+            path,
+            strict,
+            timing,
+            baseline,
+        }) => run_check(CheckOptions {
+            path: &path,
+            config: &config,
+            format: cli.format,
+            min_severity: cli.min_severity,
+            fail_on: cli.fail_on,
+            strict: strict || cli.strict,
+            show_timing: timing || cli.timing,
+            use_baseline: baseline,
+        }),
         None => {
             // Default to check with cli.path
             run_check(CheckOptions {
@@ -218,7 +221,9 @@ fn run_check(opts: CheckOptions<'_>) -> Result<()> {
                 before - diagnostics.len()
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("Warning: No baseline file found. Run `cargo perf baseline` to create one.");
+                eprintln!(
+                    "Warning: No baseline file found. Run `cargo perf baseline` to create one."
+                );
                 0
             }
             Err(e) => {
@@ -368,9 +373,7 @@ fn run_explain(rule_id: &str) -> Result<()> {
     use colored::Colorize;
 
     // Find the rule
-    let rule = registry::all_rules()
-        .iter()
-        .find(|r| r.id() == rule_id);
+    let rule = registry::all_rules().iter().find(|r| r.id() == rule_id);
 
     let rule = match rule {
         Some(r) => r,
@@ -455,12 +458,16 @@ fn print_rule_explanation(rule_id: &str) {
             println!();
             println!("{}", "Bad:".red().bold());
             println!("  for user_id in user_ids {{");
-            println!("      let user = sqlx::query!(\"SELECT * FROM users WHERE id = ?\", user_id)");
+            println!(
+                "      let user = sqlx::query!(\"SELECT * FROM users WHERE id = ?\", user_id)"
+            );
             println!("          .fetch_one(&pool).await?;");
             println!("  }}");
             println!();
             println!("{}", "Good:".green().bold());
-            println!("  let users = sqlx::query!(\"SELECT * FROM users WHERE id IN (?))\", &user_ids)");
+            println!(
+                "  let users = sqlx::query!(\"SELECT * FROM users WHERE id IN (?))\", &user_ids)"
+            );
             println!("      .fetch_all(&pool).await?;");
             println!();
             println!("{}", "Performance impact:".yellow().bold());
@@ -487,7 +494,10 @@ fn print_rule_explanation(rule_id: &str) {
             println!("  }}");
             println!();
             println!("{}", "Performance impact:".yellow().bold());
-            println!("  Benchmark: {} faster with pre-compiled regex.", "737x".green().bold());
+            println!(
+                "  Benchmark: {} faster with pre-compiled regex.",
+                "737x".green().bold()
+            );
         }
 
         "clone-in-hot-loop" => {
@@ -508,7 +518,10 @@ fn print_rule_explanation(rule_id: &str) {
             println!("  // Or clone once before the loop if ownership needed");
             println!();
             println!("{}", "Performance impact:".yellow().bold());
-            println!("  Benchmark: {} faster avoiding clone in loop.", "48x".green().bold());
+            println!(
+                "  Benchmark: {} faster avoiding clone in loop.",
+                "48x".green().bold()
+            );
         }
 
         "collect-then-iterate" => {
@@ -529,7 +542,10 @@ fn print_rule_explanation(rule_id: &str) {
             println!("      .map(|x| x.process())");
             println!();
             println!("{}", "Performance impact:".yellow().bold());
-            println!("  Benchmark: {} faster without intermediate collection.", "2.3x".green().bold());
+            println!(
+                "  Benchmark: {} faster without intermediate collection.",
+                "2.3x".green().bold()
+            );
             println!();
             println!("{}", "Auto-fix available:".cyan().bold());
             println!("  This rule supports automatic fixing via `cargo perf fix`.");
@@ -553,7 +569,10 @@ fn print_rule_explanation(rule_id: &str) {
             println!("  }}");
             println!();
             println!("{}", "Performance impact:".yellow().bold());
-            println!("  Benchmark: {} faster with pre-allocated capacity.", "1.8x".green().bold());
+            println!(
+                "  Benchmark: {} faster with pre-allocated capacity.",
+                "1.8x".green().bold()
+            );
         }
 
         "format-in-loop" => {

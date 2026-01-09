@@ -227,7 +227,10 @@ impl Backend {
         // cargo-perf-ignore: vec-no-capacity
         let mut lsp_diagnostics = Vec::new();
 
-        for diag in diagnostics.into_iter().filter(|d| d.file_path == canonical_path) {
+        for diag in diagnostics
+            .into_iter()
+            .filter(|d| d.file_path == canonical_path)
+        {
             // Need clones: fix for storage, file_path for StoredDiagnostic, lsp_diag for both vectors
             // cargo-perf-ignore: clone-in-hot-loop
             let fix = diag.fix.clone();
@@ -282,7 +285,10 @@ impl Backend {
         let mut by_file: HashMap<PathBuf, Vec<PerfDiagnostic>> = HashMap::new();
         for diag in diagnostics {
             // cargo-perf-ignore: clone-in-hot-loop
-            by_file.entry(diag.file_path.clone()).or_default().push(diag);
+            by_file
+                .entry(diag.file_path.clone())
+                .or_default()
+                .push(diag);
         }
 
         // Publish and store diagnostics for each file
@@ -317,7 +323,9 @@ impl Backend {
                     stored_map.insert(uri.clone(), stored);
                 }
 
-                self.client.publish_diagnostics(uri, lsp_diagnostics, None).await;
+                self.client
+                    .publish_diagnostics(uri, lsp_diagnostics, None)
+                    .await;
             }
         }
     }
@@ -620,35 +628,65 @@ mod tests {
     #[test]
     fn test_ranges_overlap() {
         let range_a = Range {
-            start: Position { line: 5, character: 0 },
-            end: Position { line: 10, character: 0 },
+            start: Position {
+                line: 5,
+                character: 0,
+            },
+            end: Position {
+                line: 10,
+                character: 0,
+            },
         };
 
         // Overlapping range
         let range_b = Range {
-            start: Position { line: 8, character: 0 },
-            end: Position { line: 12, character: 0 },
+            start: Position {
+                line: 8,
+                character: 0,
+            },
+            end: Position {
+                line: 12,
+                character: 0,
+            },
         };
         assert!(ranges_overlap(&range_a, &range_b));
 
         // Non-overlapping range (before)
         let range_c = Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 4, character: 0 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 4,
+                character: 0,
+            },
         };
         assert!(!ranges_overlap(&range_a, &range_c));
 
         // Non-overlapping range (after)
         let range_d = Range {
-            start: Position { line: 11, character: 0 },
-            end: Position { line: 15, character: 0 },
+            start: Position {
+                line: 11,
+                character: 0,
+            },
+            end: Position {
+                line: 15,
+                character: 0,
+            },
         };
         assert!(!ranges_overlap(&range_a, &range_d));
 
         // Contained range
         let range_e = Range {
-            start: Position { line: 6, character: 0 },
-            end: Position { line: 8, character: 0 },
+            start: Position {
+                line: 6,
+                character: 0,
+            },
+            end: Position {
+                line: 8,
+                character: 0,
+            },
         };
         assert!(ranges_overlap(&range_a, &range_e));
     }

@@ -155,7 +155,9 @@ async fn bad() {
         .assert()
         .success()
         // JSON output is pretty-printed
-        .stdout(predicate::str::contains(r#""rule_id": "async-block-in-async""#));
+        .stdout(predicate::str::contains(
+            r#""rule_id": "async-block-in-async""#,
+        ));
 }
 
 #[test]

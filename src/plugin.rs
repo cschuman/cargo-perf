@@ -215,8 +215,7 @@ impl PluginRegistry {
     pub fn has_rule(&self, id: &str) -> bool {
         use crate::rules::registry;
 
-        self.custom_index.contains_key(id)
-            || (self.include_builtins && registry::has_rule(id))
+        self.custom_index.contains_key(id) || (self.include_builtins && registry::has_rule(id))
     }
 
     /// Get all rule IDs.

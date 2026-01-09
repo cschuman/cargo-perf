@@ -204,9 +204,8 @@ impl Baseline {
     /// Load a baseline from a specific path
     pub fn load_from(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let content = fs::read_to_string(path.as_ref())?;
-        let mut baseline: Baseline = serde_json::from_str(&content).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let mut baseline: Baseline = serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         // Build lookup cache
         baseline.fingerprints = baseline
@@ -316,7 +315,10 @@ impl Baseline {
         // Group diagnostics by file path for efficient caching
         let mut by_file: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
         for diag in diagnostics {
-            by_file.entry(diag.file_path.clone()).or_default().push(diag);
+            by_file
+                .entry(diag.file_path.clone())
+                .or_default()
+                .push(diag);
         }
 
         let mut result = Vec::new();
@@ -381,8 +383,8 @@ fn chrono_lite_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     fn create_test_diagnostic(rule_id: &'static str, file: PathBuf, line: usize) -> Diagnostic {
         Diagnostic {
