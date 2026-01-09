@@ -2,6 +2,7 @@
 //!
 //! Tests the command-line interface behavior.
 
+use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
@@ -9,7 +10,7 @@ use tempfile::TempDir;
 
 /// Get a Command for the cargo-perf binary.
 fn cargo_perf() -> Command {
-    Command::cargo_bin("cargo-perf").unwrap()
+    cargo_bin_cmd!("cargo-perf")
 }
 
 #[test]
