@@ -439,7 +439,7 @@ mod tests {
         let diag2 = create_test_diagnostic("rule-b", file, 2);
 
         // Only baseline the first diagnostic
-        let baseline = Baseline::from_diagnostics(&[diag1.clone()], tmp.path());
+        let baseline = Baseline::from_diagnostics(std::slice::from_ref(&diag1), tmp.path());
 
         let filtered = baseline.filter(vec![diag1, diag2], tmp.path());
         assert_eq!(filtered.len(), 1);
