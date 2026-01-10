@@ -86,12 +86,15 @@ pub fn discover_rust_files(path: &Path, options: &DiscoveryOptions) -> Vec<PathB
                 Ok(meta) if meta.is_file() => {
                     // Check file size limit if enabled
                     if options.check_file_size && meta.len() > MAX_FILE_SIZE {
-                        eprintln!(
-                            "Warning: Skipping {} (file too large: {} bytes, max: {} bytes)",
-                            file_path.display(),
-                            meta.len(),
-                            MAX_FILE_SIZE
-                        );
+                        // Only show warning in verbose mode to avoid noisy output
+                        if std::env::var("CARGO_PERF_VERBOSE").is_ok() {
+                            eprintln!(
+                                "Warning: Skipping {} (file too large: {} bytes, max: {} bytes)",
+                                file_path.display(),
+                                meta.len(),
+                                MAX_FILE_SIZE
+                            );
+                        }
                         continue;
                     }
                     files.push(file_path.to_path_buf());

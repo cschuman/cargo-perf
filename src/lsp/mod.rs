@@ -137,8 +137,9 @@ impl Backend {
         let now = Instant::now();
         last_analysis.insert(uri_str, now);
 
-        // Cleanup if cache exceeds limit: remove stale entries
-        if last_analysis.len() > MAX_RATE_LIMIT_ENTRIES {
+        // Cleanup only when significantly over limit to reduce lock contention
+        // Using 2x threshold avoids frequent cleanup during heavy analysis
+        if last_analysis.len() > MAX_RATE_LIMIT_ENTRIES * 2 {
             let stale_threshold = std::time::Duration::from_secs(RATE_LIMIT_STALE_SECS);
             last_analysis.retain(|_, instant| instant.elapsed() < stale_threshold);
         }
@@ -285,10 +286,8 @@ impl Backend {
         let mut by_file: HashMap<PathBuf, Vec<PerfDiagnostic>> = HashMap::new();
         for diag in diagnostics {
             // cargo-perf-ignore: clone-in-hot-loop
-            by_file
-                .entry(diag.file_path.clone())
-                .or_default()
-                .push(diag);
+            let key = diag.file_path.clone();
+            by_file.entry(key).or_default().push(diag);
         }
 
         // Publish and store diagnostics for each file
@@ -448,7 +447,14 @@ impl LanguageServer for Backend {
             // Read file to build LineIndex for byte-to-position conversion
             let source = match std::fs::read_to_string(&stored_diag.file_path) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Cannot read file for code action: {} ({})",
+                        stored_diag.file_path.display(),
+                        e
+                    );
+                    continue;
+                }
             };
             let line_index = LineIndex::new(&source);
 

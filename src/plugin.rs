@@ -173,7 +173,13 @@ impl PluginRegistry {
     pub fn rules(&self) -> Vec<&dyn Rule> {
         use crate::rules::registry;
 
-        let mut rules: Vec<&dyn Rule> = Vec::new();
+        // Pre-allocate capacity: max builtins + all custom rules
+        let builtin_count = if self.include_builtins {
+            registry::all_rules().len()
+        } else {
+            0
+        };
+        let mut rules: Vec<&dyn Rule> = Vec::with_capacity(builtin_count + self.custom_rules.len());
 
         // Add built-in rules (if enabled), skipping those overridden by custom rules
         if self.include_builtins {

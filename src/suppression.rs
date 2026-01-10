@@ -1,9 +1,43 @@
 //! Inline suppression support for cargo-perf diagnostics.
 //!
-//! Supports suppressing warnings with:
-//! - `#[allow(cargo_perf::rule_id)]` - suppress specific rule
-//! - `#[allow(cargo_perf::all)]` - suppress all cargo-perf warnings
-//! - `// cargo-perf-ignore: rule_id` - line-level suppression
+//! Two suppression mechanisms are available with different scopes:
+//!
+//! ## Attribute-based Suppression (Scoped)
+//!
+//! Suppresses diagnostics for an entire item (function, struct, impl block, etc.):
+//!
+//! ```rust,ignore
+//! #[allow(cargo_perf::clone_in_hot_loop)]  // Suppresses this rule for the entire function
+//! fn process_items(items: &[Item]) {
+//!     for item in items {
+//!         let copy = item.clone();  // No warning
+//!     }
+//! }
+//!
+//! #[allow(cargo_perf::all)]  // Suppresses all cargo-perf warnings for the function
+//! fn legacy_code() { /* ... */ }
+//! ```
+//!
+//! ## Comment-based Suppression (Line-level)
+//!
+//! Suppresses diagnostics for the next line only (fine-grained control):
+//!
+//! ```rust,ignore
+//! fn process_items(items: &[Item]) {
+//!     for item in items {
+//!         // cargo-perf-ignore: clone-in-hot-loop
+//!         let copy = item.clone();  // No warning (only this line)
+//!         let other = item.clone(); // Warning! (not suppressed)
+//!     }
+//! }
+//! ```
+//!
+//! ## When to Use Which
+//!
+//! - **Attributes**: When you've reviewed an entire function/type and determined all
+//!   diagnostics are acceptable. Good for legacy code or intentional patterns.
+//! - **Comments**: When only specific lines need suppression. Provides documentation
+//!   for why that particular usage is acceptable.
 
 use std::collections::HashSet;
 use syn::visit::Visit;

@@ -286,19 +286,23 @@ impl Baseline {
                     Fingerprint::from_diagnostic_with_cache(diag, root, &lines)
                 {
                     if !baseline.fingerprints.contains(&fingerprint) {
-                        let entry = BaselineEntry {
-                            fingerprint: fingerprint.clone(),
-                            description: format!(
-                                "{}: {} ({}:{})",
-                                diag.rule_id,
-                                diag.message,
-                                diag.file_path.display(),
-                                diag.line
-                            ),
+                        // Each diagnostic needs a unique description
+                        // cargo-perf-ignore: format-in-loop
+                        let description = format!(
+                            "{}: {} ({}:{})",
+                            diag.rule_id,
+                            diag.message,
+                            diag.file_path.display(),
+                            diag.line
+                        );
+                        // Clone needed: fingerprint goes into both HashSet and entry
+                        // cargo-perf-ignore: clone-in-hot-loop
+                        baseline.fingerprints.insert(fingerprint.clone());
+                        baseline.entries.push(BaselineEntry {
+                            fingerprint,
+                            description,
                             added: Some(chrono_lite_now()),
-                        };
-                        baseline.entries.push(entry);
-                        baseline.fingerprints.insert(fingerprint);
+                        });
                     }
                 }
             }
@@ -312,16 +316,19 @@ impl Baseline {
     /// This method uses file caching to avoid re-reading the same file
     /// when checking multiple diagnostics from the same source file.
     pub fn filter(&self, diagnostics: Vec<Diagnostic>, root: &Path) -> Vec<Diagnostic> {
+        // Pre-allocate result with same capacity as input (worst case: no filtering)
+        let diag_count = diagnostics.len();
+
         // Group diagnostics by file path for efficient caching
         let mut by_file: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
         for diag in diagnostics {
-            by_file
-                .entry(diag.file_path.clone())
-                .or_default()
-                .push(diag);
+            // Clone needed for HashMap key; diag ownership moves to value
+            // cargo-perf-ignore: clone-in-hot-loop
+            let key = diag.file_path.clone();
+            by_file.entry(key).or_default().push(diag);
         }
 
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(diag_count);
 
         // Process each file once, caching its content
         for (file_path, file_diagnostics) in by_file {

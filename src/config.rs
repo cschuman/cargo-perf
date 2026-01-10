@@ -93,9 +93,27 @@ impl Config {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
             let config: Config = toml::from_str(&content)?;
+
+            // Validate rule IDs against known rules
+            Self::validate_rule_ids(&config);
+
             Ok(config)
         } else {
             Ok(Config::default())
+        }
+    }
+
+    /// Validate that configured rule IDs exist, warning about unknown ones.
+    fn validate_rule_ids(config: &Config) {
+        use crate::rules::registry;
+
+        for rule_id in config.rules.keys() {
+            if !registry::has_rule(rule_id) {
+                eprintln!(
+                    "Warning: Unknown rule '{}' in cargo-perf.toml (will be ignored)",
+                    rule_id
+                );
+            }
         }
     }
 
