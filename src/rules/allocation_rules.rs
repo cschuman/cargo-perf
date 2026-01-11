@@ -156,6 +156,308 @@ fn is_vec_new(expr: &Expr) -> bool {
     }
 }
 
+/// Detects HashMap::new() followed by insert in a loop without using with_capacity
+pub struct HashMapNoCapacityRule;
+
+impl Rule for HashMapNoCapacityRule {
+    fn id(&self) -> &'static str {
+        "hashmap-no-capacity"
+    }
+
+    fn name(&self) -> &'static str {
+        "HashMap Without Capacity"
+    }
+
+    fn description(&self) -> &'static str {
+        "Detects HashMap::new() followed by insert in loop; use with_capacity instead"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    fn check(&self, ctx: &AnalysisContext) -> Vec<Diagnostic> {
+        let mut visitor = HashMapNoCapacityVisitor {
+            ctx,
+            diagnostics: Vec::new(),
+            map_vars: std::collections::HashMap::new(),
+            state: VisitorState::new(),
+        };
+        visitor.visit_file(ctx.ast);
+        visitor.diagnostics
+    }
+}
+
+struct HashMapNoCapacityVisitor<'a> {
+    ctx: &'a AnalysisContext<'a>,
+    diagnostics: Vec<Diagnostic>,
+    /// Maps variable name to declaration location (line, column)
+    map_vars: std::collections::HashMap<String, (usize, usize)>,
+    state: VisitorState,
+}
+
+impl<'ast> Visit<'ast> for HashMapNoCapacityVisitor<'_> {
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        // Check for `let x = HashMap::new()` pattern
+        if let Some(init) = &node.init {
+            if is_hashmap_new(&init.expr) {
+                if let syn::Pat::Ident(pat_ident) = &node.pat {
+                    // Store declaration location for better diagnostic placement
+                    let span = pat_ident.ident.span();
+                    let line = span.start().line;
+                    let column = span.start().column;
+                    self.map_vars
+                        .insert(pat_ident.ident.to_string(), (line, column));
+                }
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_loop();
+        syn::visit::visit_expr_for_loop(self, node);
+        self.state.exit_loop();
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_loop();
+        syn::visit::visit_expr_while(self, node);
+        self.state.exit_loop();
+    }
+
+    fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_loop();
+        syn::visit::visit_expr_loop(self, node);
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if self.state.in_loop() && node.method == "insert" {
+            // Check if receiver is a tracked HashMap variable
+            if let Expr::Path(ExprPath { path, .. }) = &*node.receiver {
+                if let Some(ident) = path.get_ident() {
+                    let var_name = ident.to_string();
+                    if let Some(&(decl_line, decl_column)) = self.map_vars.get(&var_name) {
+                        // Report at declaration location (where fix would be applied)
+                        self.diagnostics.push(Diagnostic {
+                            rule_id: "hashmap-no-capacity",
+                            severity: Severity::Warning,
+                            message: format!(
+                                "`{}` created with `HashMap::new()` then inserted to in loop; use `HashMap::with_capacity()` instead",
+                                ident
+                            ),
+                            file_path: self.ctx.file_path.to_path_buf(),
+                            line: decl_line,
+                            column: decl_column,
+                            end_line: None,
+                            end_column: None,
+                            suggestion: Some("Pre-allocate with `HashMap::with_capacity(expected_size)`".to_string()),
+                            fix: None,
+                        });
+
+                        // Remove from tracking to avoid duplicate warnings
+                        self.map_vars.remove(&var_name);
+                    }
+                }
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Check if an expression is HashMap::new()
+fn is_hashmap_new(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(ExprCall { func, .. }) => {
+            if let Expr::Path(ExprPath { path, .. }) = &**func {
+                let path_str: String = path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                path_str.ends_with("HashMap::new")
+                    || (path_str == "new" && path.segments.len() == 1)
+            } else {
+                false
+            }
+        }
+        Expr::MethodCall(call) => call.method == "new",
+        _ => false,
+    }
+}
+
+/// Detects String::new() followed by push_str in a loop without using with_capacity
+pub struct StringNoCapacityRule;
+
+impl Rule for StringNoCapacityRule {
+    fn id(&self) -> &'static str {
+        "string-no-capacity"
+    }
+
+    fn name(&self) -> &'static str {
+        "String Without Capacity"
+    }
+
+    fn description(&self) -> &'static str {
+        "Detects String::new() followed by push_str in loop; use with_capacity instead"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    fn check(&self, ctx: &AnalysisContext) -> Vec<Diagnostic> {
+        let mut visitor = StringNoCapacityVisitor {
+            ctx,
+            diagnostics: Vec::new(),
+            string_vars: std::collections::HashMap::new(),
+            state: VisitorState::new(),
+        };
+        visitor.visit_file(ctx.ast);
+        visitor.diagnostics
+    }
+}
+
+struct StringNoCapacityVisitor<'a> {
+    ctx: &'a AnalysisContext<'a>,
+    diagnostics: Vec<Diagnostic>,
+    /// Maps variable name to declaration location (line, column)
+    string_vars: std::collections::HashMap<String, (usize, usize)>,
+    state: VisitorState,
+}
+
+impl<'ast> Visit<'ast> for StringNoCapacityVisitor<'_> {
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        // Check for `let x = String::new()` pattern
+        if let Some(init) = &node.init {
+            if is_string_new(&init.expr) {
+                if let syn::Pat::Ident(pat_ident) = &node.pat {
+                    // Store declaration location for better diagnostic placement
+                    let span = pat_ident.ident.span();
+                    let line = span.start().line;
+                    let column = span.start().column;
+                    self.string_vars
+                        .insert(pat_ident.ident.to_string(), (line, column));
+                }
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_loop();
+        syn::visit::visit_expr_for_loop(self, node);
+        self.state.exit_loop();
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_loop();
+        syn::visit::visit_expr_while(self, node);
+        self.state.exit_loop();
+    }
+
+    fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_loop();
+        syn::visit::visit_expr_loop(self, node);
+        self.state.exit_loop();
+    }
+
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_expr();
+        syn::visit::visit_expr(self, node);
+        self.state.exit_expr();
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        // Check for push_str, push, or write_str which grow the string
+        if self.state.in_loop()
+            && (node.method == "push_str" || node.method == "push" || node.method == "write_str")
+        {
+            // Check if receiver is a tracked String variable
+            if let Expr::Path(ExprPath { path, .. }) = &*node.receiver {
+                if let Some(ident) = path.get_ident() {
+                    let var_name = ident.to_string();
+                    if let Some(&(decl_line, decl_column)) = self.string_vars.get(&var_name) {
+                        // Report at declaration location (where fix would be applied)
+                        self.diagnostics.push(Diagnostic {
+                            rule_id: "string-no-capacity",
+                            severity: Severity::Warning,
+                            message: format!(
+                                "`{}` created with `String::new()` then appended to in loop; use `String::with_capacity()` instead",
+                                ident
+                            ),
+                            file_path: self.ctx.file_path.to_path_buf(),
+                            line: decl_line,
+                            column: decl_column,
+                            end_line: None,
+                            end_column: None,
+                            suggestion: Some("Pre-allocate with `String::with_capacity(expected_size)`".to_string()),
+                            fix: None,
+                        });
+
+                        // Remove from tracking to avoid duplicate warnings
+                        self.string_vars.remove(&var_name);
+                    }
+                }
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Check if an expression is String::new()
+fn is_string_new(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(ExprCall { func, .. }) => {
+            if let Expr::Path(ExprPath { path, .. }) = &**func {
+                let path_str: String = path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                path_str.ends_with("String::new")
+            } else {
+                false
+            }
+        }
+        Expr::MethodCall(call) => call.method == "new",
+        _ => false,
+    }
+}
+
 /// Detects format!() macro calls inside loops
 pub struct FormatInLoopRule;
 
@@ -631,6 +933,139 @@ mod tests {
         let config = Config::default();
         let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
         MutexLockInLoopRule.check(&ctx)
+    }
+
+    fn check_hashmap_capacity(source: &str) -> Vec<Diagnostic> {
+        let ast = syn::parse_file(source).expect("Failed to parse");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
+        HashMapNoCapacityRule.check(&ctx)
+    }
+
+    fn check_string_capacity(source: &str) -> Vec<Diagnostic> {
+        let ast = syn::parse_file(source).expect("Failed to parse");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
+        StringNoCapacityRule.check(&ctx)
+    }
+
+    // String capacity tests
+    #[test]
+    fn test_string_new_push_str_in_loop() {
+        let source = r#"
+            fn test() {
+                let mut s = String::new();
+                for word in ["hello", "world"] {
+                    s.push_str(word);
+                }
+            }
+        "#;
+        let diagnostics = check_string_capacity(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("String::new()"));
+        assert!(diagnostics[0].message.contains("with_capacity"));
+    }
+
+    #[test]
+    fn test_string_new_push_char_in_loop() {
+        let source = r#"
+            fn test() {
+                let mut s = String::new();
+                for c in "hello".chars() {
+                    s.push(c);
+                }
+            }
+        "#;
+        let diagnostics = check_string_capacity(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_string_with_capacity_no_warning() {
+        let source = r#"
+            fn test() {
+                let mut s = String::with_capacity(100);
+                for word in ["hello", "world"] {
+                    s.push_str(word);
+                }
+            }
+        "#;
+        let diagnostics = check_string_capacity(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_string_push_str_outside_loop_ok() {
+        let source = r#"
+            fn test() {
+                let mut s = String::new();
+                s.push_str("hello");
+                s.push_str(" world");
+            }
+        "#;
+        let diagnostics = check_string_capacity(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    // HashMap capacity tests
+    #[test]
+    fn test_hashmap_new_insert_in_loop() {
+        let source = r#"
+            use std::collections::HashMap;
+            fn test() {
+                let mut map = HashMap::new();
+                for i in 0..100 {
+                    map.insert(i, i * 2);
+                }
+            }
+        "#;
+        let diagnostics = check_hashmap_capacity(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("HashMap::new()"));
+        assert!(diagnostics[0].message.contains("with_capacity"));
+    }
+
+    #[test]
+    fn test_hashmap_with_capacity_no_warning() {
+        let source = r#"
+            use std::collections::HashMap;
+            fn test() {
+                let mut map = HashMap::with_capacity(100);
+                for i in 0..100 {
+                    map.insert(i, i * 2);
+                }
+            }
+        "#;
+        let diagnostics = check_hashmap_capacity(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_hashmap_insert_outside_loop_ok() {
+        let source = r#"
+            use std::collections::HashMap;
+            fn test() {
+                let mut map = HashMap::new();
+                map.insert(1, "one");
+                map.insert(2, "two");
+            }
+        "#;
+        let diagnostics = check_hashmap_capacity(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_hashmap_fully_qualified_path() {
+        let source = r#"
+            fn test() {
+                let mut map = std::collections::HashMap::new();
+                for i in 0..100 {
+                    map.insert(i, i);
+                }
+            }
+        "#;
+        let diagnostics = check_hashmap_capacity(source);
+        assert_eq!(diagnostics.len(), 1);
     }
 
     // Vec capacity tests

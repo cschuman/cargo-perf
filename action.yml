@@ -1,0 +1,144 @@
+name: 'Cargo Perf'
+description: 'Static analysis for Rust performance anti-patterns and async correctness'
+author: 'cargo-perf'
+
+branding:
+  icon: 'zap'
+  color: 'orange'
+
+inputs:
+  path:
+    description: 'Path to analyze (defaults to current directory)'
+    required: false
+    default: '.'
+  fail-on-error:
+    description: 'Fail the action if any errors are found'
+    required: false
+    default: 'true'
+  fail-on-warning:
+    description: 'Fail the action if any warnings are found'
+    required: false
+    default: 'false'
+  sarif:
+    description: 'Generate SARIF output and upload to GitHub Code Scanning'
+    required: false
+    default: 'true'
+  version:
+    description: 'Version of cargo-perf to install (defaults to latest)'
+    required: false
+    default: 'latest'
+  token:
+    description: 'GitHub token for uploading SARIF results'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  issues-found:
+    description: 'Number of issues found'
+    value: ${{ steps.analyze.outputs.issues-found }}
+  errors-found:
+    description: 'Number of errors found'
+    value: ${{ steps.analyze.outputs.errors-found }}
+  warnings-found:
+    description: 'Number of warnings found'
+    value: ${{ steps.analyze.outputs.warnings-found }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo-perf
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-perf
+        key: cargo-perf-${{ inputs.version }}-${{ runner.os }}
+
+    - name: Install cargo-perf
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          cargo install cargo-perf --locked
+        else
+          cargo install cargo-perf --version "${{ inputs.version }}" --locked
+        fi
+
+    - name: Run analysis
+      id: analyze
+      shell: bash
+      run: |
+        set +e
+
+        # Run cargo-perf and capture output
+        if [ "${{ inputs.sarif }}" = "true" ]; then
+          cargo perf check "${{ inputs.path }}" --format sarif > results.sarif 2>&1
+          EXIT_CODE=$?
+        else
+          OUTPUT=$(cargo perf check "${{ inputs.path }}" --format json 2>&1)
+          EXIT_CODE=$?
+        fi
+
+        # Parse results for GitHub output
+        if [ "${{ inputs.sarif }}" = "true" ] && [ -f results.sarif ]; then
+          # Count issues from SARIF
+          ERRORS=$(cat results.sarif | jq '[.runs[0].results[] | select(.level == "error")] | length' 2>/dev/null || echo "0")
+          WARNINGS=$(cat results.sarif | jq '[.runs[0].results[] | select(.level == "warning")] | length' 2>/dev/null || echo "0")
+          TOTAL=$((ERRORS + WARNINGS))
+        else
+          ERRORS=0
+          WARNINGS=0
+          TOTAL=0
+        fi
+
+        echo "issues-found=$TOTAL" >> $GITHUB_OUTPUT
+        echo "errors-found=$ERRORS" >> $GITHUB_OUTPUT
+        echo "warnings-found=$WARNINGS" >> $GITHUB_OUTPUT
+
+        # Display summary
+        echo "### Cargo Perf Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Errors | $ERRORS |" >> $GITHUB_STEP_SUMMARY
+        echo "| Warnings | $WARNINGS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Total** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
+
+        # Determine exit code based on settings
+        SHOULD_FAIL=0
+        if [ "${{ inputs.fail-on-error }}" = "true" ] && [ "$ERRORS" -gt 0 ]; then
+          SHOULD_FAIL=1
+        fi
+        if [ "${{ inputs.fail-on-warning }}" = "true" ] && [ "$WARNINGS" -gt 0 ]; then
+          SHOULD_FAIL=1
+        fi
+
+        # Save SARIF even if we're going to fail
+        if [ "$SHOULD_FAIL" -eq 1 ]; then
+          echo "::error::cargo-perf found issues that exceed threshold"
+        fi
+
+        exit 0  # Don't fail yet, let SARIF upload first
+
+    - name: Upload SARIF results
+      if: inputs.sarif == 'true' && always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: results.sarif
+        token: ${{ inputs.token }}
+      continue-on-error: true
+
+    - name: Check failure threshold
+      shell: bash
+      run: |
+        ERRORS=${{ steps.analyze.outputs.errors-found }}
+        WARNINGS=${{ steps.analyze.outputs.warnings-found }}
+
+        if [ "${{ inputs.fail-on-error }}" = "true" ] && [ "$ERRORS" -gt 0 ]; then
+          echo "::error::Found $ERRORS error(s)"
+          exit 1
+        fi
+        if [ "${{ inputs.fail-on-warning }}" = "true" ] && [ "$WARNINGS" -gt 0 ]; then
+          echo "::error::Found $WARNINGS warning(s)"
+          exit 1
+        fi

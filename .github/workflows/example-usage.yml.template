@@ -1,0 +1,45 @@
+# Example workflow for using cargo-perf GitHub Action
+# Copy this file to your project's .github/workflows/ directory
+# and rename it to cargo-perf.yml (remove the .template extension)
+
+name: Performance Analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cargo-perf:
+    name: Rust Performance Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # Required for SARIF upload
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run cargo-perf
+        uses: your-org/cargo-perf@v1  # Replace with actual action reference
+        with:
+          path: '.'
+          fail-on-error: 'true'
+          fail-on-warning: 'false'
+          sarif: 'true'
+
+# Alternative: Run cargo-perf directly without the action
+# jobs:
+#   cargo-perf-manual:
+#     name: Performance Analysis (Manual)
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: dtolnay/rust-toolchain@stable
+#       - run: cargo install cargo-perf --locked
+#       - run: cargo perf check . --format sarif > results.sarif
+#       - uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: results.sarif

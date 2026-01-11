@@ -68,11 +68,51 @@ cargo perf fix                      # Apply auto-fixes
 | `clone-in-hot-loop` | `.clone()` on heap types in loops | 48x slower |
 | `collect-then-iterate` | `.collect().iter()` | 2.3x slower |
 | `vec-no-capacity` | `Vec::new()` + push in loop | 1.8x slower |
+| `hashmap-no-capacity` | `HashMap::new()` + insert in loop | Repeated rehashing |
+| `string-no-capacity` | `String::new()` + push_str in loop | Repeated realloc |
 | `format-in-loop` | `format!()` inside loops | Allocates each iteration |
 | `string-concat-loop` | String `+` in loops | Use `push_str()` |
 | `mutex-in-loop` | Lock acquired inside loop | Acquire once outside |
 
 ## CI Integration
+
+### GitHub Action
+
+Use the official GitHub Action for the easiest setup:
+
+```yaml
+# .github/workflows/perf.yml
+name: Performance Analysis
+
+on: [push, pull_request]
+
+jobs:
+  cargo-perf:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # For SARIF upload
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cschuman/cargo-perf@v1
+        with:
+          path: '.'
+          fail-on-error: 'true'
+          sarif: 'true'  # Enables GitHub Code Scanning integration
+```
+
+#### Action Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `path` | `.` | Path to analyze |
+| `fail-on-error` | `true` | Fail if errors found |
+| `fail-on-warning` | `false` | Fail if warnings found |
+| `sarif` | `true` | Upload results to GitHub Code Scanning |
+| `version` | `latest` | cargo-perf version to install |
+
+### Manual Setup
 
 ```yaml
 # .github/workflows/ci.yml

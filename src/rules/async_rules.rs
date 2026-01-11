@@ -1,5 +1,5 @@
 use super::visitor::VisitorState;
-use super::{Diagnostic, Rule, Severity};
+use super::{Diagnostic, Fix, Replacement, Rule, Severity};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
 use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ItemFn, Member};
@@ -104,8 +104,30 @@ const STD_MPSC_CHANNEL_PATTERNS: &[&str] = &[
     "mpsc::channel",
 ];
 
+/// Channel replacement patterns for auto-fix
+/// Format: (match_suffix, replacement_fn, replacement_call)
+const CHANNEL_FIXES: &[(&str, &str, &str)] = &[
+    // std::sync::mpsc patterns - replace `channel()` with `sync_channel(32)`
+    ("mpsc::channel", "sync_channel", "sync_channel(32)"),
+    // tokio patterns - replace `unbounded_channel()` with `channel(32)`
+    ("unbounded_channel", "channel", "channel(32)"),
+    // crossbeam patterns - replace `unbounded()` with `bounded(32)`
+    ("crossbeam_channel::unbounded", "bounded", "bounded(32)"),
+    ("crossbeam::channel::unbounded", "bounded", "bounded(32)"),
+    // flume patterns
+    ("flume::unbounded", "bounded", "bounded(32)"),
+    // async-channel patterns
+    ("async_channel::unbounded", "bounded", "bounded(32)"),
+];
+
 impl UnboundedChannelVisitor<'_> {
-    fn report(&mut self, span: proc_macro2::Span, pattern: &str, alternative: &str) {
+    fn report(
+        &mut self,
+        span: proc_macro2::Span,
+        pattern: &str,
+        alternative: &str,
+        fix: Option<Fix>,
+    ) {
         let line = span.start().line;
         let column = span.start().column;
 
@@ -125,11 +147,65 @@ impl UnboundedChannelVisitor<'_> {
                 "Use a bounded channel with explicit capacity: `{}`",
                 alternative
             )),
-            fix: None,
+            fix,
         });
     }
 
-    fn check_unbounded_channel(&mut self, path_str: &str, span: proc_macro2::Span) {
+    /// Generate a fix for unbounded channel calls.
+    fn generate_fix(&self, node: &ExprCall, path_str: &str) -> Option<Fix> {
+        use syn::spanned::Spanned;
+
+        // Find matching fix pattern
+        for &(match_suffix, _replacement_fn, replacement_call) in CHANNEL_FIXES {
+            if path_str.ends_with(match_suffix) {
+                // Skip tokio's bounded channel (already bounded)
+                if path_str.contains("tokio") && !path_str.contains("unbounded") {
+                    return None;
+                }
+
+                // Get the span of the function path (before the parens)
+                if let Expr::Path(ExprPath { path, .. }) = &*node.func {
+                    let path_span = path.span();
+                    let (path_start, path_end) = self.ctx.span_to_byte_range(path_span)?;
+
+                    // Build the new path by replacing the function name
+                    let original_path = self.ctx.source.get(path_start..path_end)?;
+
+                    // Find where the function name starts (after last ::)
+                    let fn_name_start = if let Some(pos) = original_path.rfind("::") {
+                        pos + 2
+                    } else {
+                        0
+                    };
+
+                    let prefix = &original_path[..fn_name_start];
+                    let new_path = format!("{}{}", prefix, replacement_call);
+
+                    // Get the full call span (including parens)
+                    let call_span = node.span();
+                    let (call_start, call_end) = self.ctx.span_to_byte_range(call_span)?;
+
+                    return Some(Fix {
+                        description: format!("Replace with bounded channel: `{}`", new_path),
+                        replacements: vec![Replacement {
+                            file_path: self.ctx.file_path.to_path_buf(),
+                            start_byte: call_start,
+                            end_byte: call_end,
+                            new_text: new_path,
+                        }],
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    fn check_unbounded_channel(
+        &mut self,
+        node: &ExprCall,
+        path_str: &str,
+        span: proc_macro2::Span,
+    ) {
         // Special case: std::sync::mpsc::channel is unbounded, but tokio::sync::mpsc::channel is bounded
         // We need to detect std's channel without flagging tokio's
         for &pattern in STD_MPSC_CHANNEL_PATTERNS {
@@ -140,7 +216,8 @@ impl UnboundedChannelVisitor<'_> {
                 if is_boundary {
                     // Make sure it's NOT tokio's channel
                     if !path_str.contains("tokio") {
-                        self.report(span, pattern, "std::sync::mpsc::sync_channel(N)");
+                        let fix = self.generate_fix(node, path_str);
+                        self.report(span, pattern, "std::sync::mpsc::sync_channel(N)", fix);
                         return;
                     }
                 }
@@ -154,7 +231,8 @@ impl UnboundedChannelVisitor<'_> {
                 let is_boundary = prefix_len == 0 || path_str[..prefix_len].ends_with("::");
 
                 if is_boundary {
-                    self.report(span, pattern, alternative);
+                    let fix = self.generate_fix(node, path_str);
+                    self.report(span, pattern, alternative, fix);
                     return;
                 }
             }
@@ -187,7 +265,7 @@ impl<'ast> Visit<'ast> for UnboundedChannelVisitor<'_> {
                 .map(|s| s.ident.span())
                 .unwrap_or_else(proc_macro2::Span::call_site);
 
-            self.check_unbounded_channel(&path_str, span);
+            self.check_unbounded_channel(node, &path_str, span);
         }
         syn::visit::visit_expr_call(self, node);
     }
@@ -590,12 +668,17 @@ const BLOCKING_CALLS: &[(&str, &str, &str)] = &[
 ];
 
 impl AsyncBlockingVisitor<'_> {
-    fn check_blocking_call(&mut self, full_path: &str, span: proc_macro2::Span) {
+    fn check_blocking_call_with_fix(
+        &mut self,
+        full_path: &str,
+        span: proc_macro2::Span,
+        path_span: Option<proc_macro2::Span>,
+    ) {
         // Find the best (most specific) match
-        let mut best_match: Option<(&str, &str)> = None;
+        let mut best_match: Option<(&str, &str, &str)> = None;
         let mut best_match_len = 0;
 
-        for (_module_path, func_name, alternative) in BLOCKING_CALLS {
+        for (module_path, func_name, alternative) in BLOCKING_CALLS {
             // Check if the path ends with the function name
             // e.g., "std::fs::read_to_string" ends with "read_to_string"
             // or "thread::sleep" ends with "sleep"
@@ -605,15 +688,18 @@ impl AsyncBlockingVisitor<'_> {
                 let is_boundary = prefix_len == 0 || full_path[..prefix_len].ends_with("::");
 
                 if is_boundary && func_name.len() > best_match_len {
-                    best_match = Some((func_name, alternative));
+                    best_match = Some((module_path, func_name, alternative));
                     best_match_len = func_name.len();
                 }
             }
         }
 
-        if let Some((func_name, alternative)) = best_match {
+        if let Some((_module_path, func_name, alternative)) = best_match {
             let line = span.start().line;
             let column = span.start().column;
+
+            // Try to generate a fix for function calls (not method calls)
+            let fix = path_span.and_then(|ps| self.generate_blocking_fix(ps, alternative));
 
             self.diagnostics.push(Diagnostic {
                 rule_id: "async-block-in-async",
@@ -628,9 +714,28 @@ impl AsyncBlockingVisitor<'_> {
                 end_line: None,
                 end_column: None,
                 suggestion: Some(format!("Replace with `{}`", alternative)),
-                fix: None,
+                fix,
             });
         }
+    }
+
+    /// Generate a fix by replacing the function path with the async alternative.
+    fn generate_blocking_fix(
+        &self,
+        path_span: proc_macro2::Span,
+        alternative: &str,
+    ) -> Option<Fix> {
+        let (start, end) = self.ctx.span_to_byte_range(path_span)?;
+
+        Some(Fix {
+            description: format!("Replace with `{}`", alternative),
+            replacements: vec![Replacement {
+                file_path: self.ctx.file_path.to_path_buf(),
+                start_byte: start,
+                end_byte: end,
+                new_text: alternative.to_string(),
+            }],
+        })
     }
 }
 
@@ -660,19 +765,21 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         if self.in_async_fn {
             // Extract the function path
             if let Expr::Path(ExprPath { path, .. }) = &*node.func {
+                use syn::spanned::Spanned;
                 let path_str = path
                     .segments
                     .iter()
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
-                self.check_blocking_call(
-                    &path_str,
-                    path.segments
-                        .first()
-                        .map(|s| s.ident.span())
-                        .unwrap_or_else(proc_macro2::Span::call_site),
-                );
+                let display_span = path
+                    .segments
+                    .first()
+                    .map(|s| s.ident.span())
+                    .unwrap_or_else(proc_macro2::Span::call_site);
+                // Pass the full path span for fix generation
+                let path_span = path.span();
+                self.check_blocking_call_with_fix(&path_str, display_span, Some(path_span));
             }
         }
         syn::visit::visit_expr_call(self, node);
@@ -681,7 +788,8 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if self.in_async_fn {
             let method_name = node.method.to_string();
-            self.check_blocking_call(&method_name, node.method.span());
+            // Method calls can't be easily auto-fixed (would need to change receiver too)
+            self.check_blocking_call_with_fix(&method_name, node.method.span(), None);
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -950,6 +1058,60 @@ mod tests {
         assert_eq!(rule.default_severity(), Severity::Warning);
     }
 
+    #[test]
+    fn test_unbounded_channel_fix_std_mpsc() {
+        let source = r#"fn test() { let (tx, rx) = std::sync::mpsc::channel(); }"#;
+        let diagnostics = check_channel_code(source);
+        assert_eq!(diagnostics.len(), 1);
+
+        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix");
+        assert_eq!(fix.replacements.len(), 1);
+
+        let replacement = &fix.replacements[0];
+        let mut result = source.to_string();
+        result.replace_range(
+            replacement.start_byte..replacement.end_byte,
+            &replacement.new_text,
+        );
+
+        assert!(
+            result.contains("sync_channel(32)"),
+            "Fix should use sync_channel: {}",
+            result
+        );
+        assert!(
+            !result.contains("mpsc::channel()"),
+            "Fix should remove unbounded channel: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_unbounded_channel_fix_tokio() {
+        let source = r#"fn test() { let (tx, rx) = tokio::sync::mpsc::unbounded_channel(); }"#;
+        let diagnostics = check_channel_code(source);
+        assert_eq!(diagnostics.len(), 1);
+
+        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix");
+        let replacement = &fix.replacements[0];
+        let mut result = source.to_string();
+        result.replace_range(
+            replacement.start_byte..replacement.end_byte,
+            &replacement.new_text,
+        );
+
+        assert!(
+            result.contains("channel(32)"),
+            "Fix should use bounded channel: {}",
+            result
+        );
+        assert!(
+            !result.contains("unbounded_channel"),
+            "Fix should remove unbounded: {}",
+            result
+        );
+    }
+
     // ========================================================================
     // Blocking Call Tests
     // ========================================================================
@@ -1046,5 +1208,60 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("read_to_string"));
+    }
+
+    #[test]
+    fn test_async_blocking_fix_fs_read() {
+        let source = r#"async fn test() { let _ = std::fs::read_to_string("file.txt"); }"#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+
+        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix");
+        assert_eq!(fix.replacements.len(), 1);
+
+        let replacement = &fix.replacements[0];
+        let mut result = source.to_string();
+        result.replace_range(
+            replacement.start_byte..replacement.end_byte,
+            &replacement.new_text,
+        );
+
+        assert!(
+            result.contains("tokio::fs::read_to_string"),
+            "Fix should use tokio alternative: {}",
+            result
+        );
+        assert!(
+            !result.contains("std::fs::read_to_string"),
+            "Fix should remove std call: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_async_blocking_fix_thread_sleep() {
+        let source =
+            r#"async fn test() { std::thread::sleep(std::time::Duration::from_secs(1)); }"#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+
+        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix");
+        let replacement = &fix.replacements[0];
+        let mut result = source.to_string();
+        result.replace_range(
+            replacement.start_byte..replacement.end_byte,
+            &replacement.new_text,
+        );
+
+        assert!(
+            result.contains("tokio::time::sleep"),
+            "Fix should use tokio sleep: {}",
+            result
+        );
+        assert!(
+            !result.contains("std::thread::sleep"),
+            "Fix should remove std sleep: {}",
+            result
+        );
     }
 }

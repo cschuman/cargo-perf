@@ -3,7 +3,8 @@
 //! Rules are initialized once using `LazyLock` and reused across all analysis runs.
 
 use super::allocation_rules::{
-    FormatInLoopRule, MutexLockInLoopRule, StringConcatLoopRule, VecNoCapacityRule,
+    FormatInLoopRule, HashMapNoCapacityRule, MutexLockInLoopRule, StringConcatLoopRule,
+    StringNoCapacityRule, VecNoCapacityRule,
 };
 use super::async_rules::{AsyncBlockInAsyncRule, UnboundedChannelRule, UnboundedSpawnRule};
 use super::database_rules::NPlusOneQueryRule;
@@ -31,6 +32,8 @@ static RULES: LazyLock<Vec<Box<dyn Rule>>> = LazyLock::new(|| {
         Box::new(CollectThenIterateRule),
         // Allocation rules
         Box::new(VecNoCapacityRule),
+        Box::new(HashMapNoCapacityRule),
+        Box::new(StringNoCapacityRule),
         Box::new(FormatInLoopRule),
         Box::new(StringConcatLoopRule),
         Box::new(MutexLockInLoopRule),
@@ -116,6 +119,8 @@ mod tests {
         assert!(ids.contains(&"regex-in-loop"));
         assert!(ids.contains(&"collect-then-iterate"));
         assert!(ids.contains(&"vec-no-capacity"));
+        assert!(ids.contains(&"hashmap-no-capacity"));
+        assert!(ids.contains(&"string-no-capacity"));
         assert!(ids.contains(&"format-in-loop"));
         assert!(ids.contains(&"string-concat-loop"));
         assert!(ids.contains(&"mutex-in-loop"));
