@@ -85,14 +85,23 @@ impl LockAcrossAwaitVisitor<'_> {
         }
     }
 
-    /// Analyze a block of statements for lock-across-await issues
-    fn analyze_block(&mut self, stmts: &[Stmt], in_async: bool) {
+    /// Analyze a block of statements for lock-across-await issues.
+    ///
+    /// The `outer_guards` parameter contains guards from enclosing scopes that
+    /// are still active. Guards declared in this block are tracked separately
+    /// and automatically "dropped" when the block ends.
+    fn analyze_block(
+        &mut self,
+        stmts: &[Stmt],
+        in_async: bool,
+        outer_guards: &HashMap<String, usize>,
+    ) {
         if !in_async {
             return;
         }
 
-        // Track guards by their declaration line
-        let mut active_guards: HashMap<String, usize> = HashMap::new();
+        // Track guards declared in THIS block (separate from outer scope guards)
+        let mut block_guards: HashMap<String, usize> = HashMap::new();
 
         for stmt in stmts {
             match stmt {
@@ -102,20 +111,26 @@ impl LockAcrossAwaitVisitor<'_> {
                         if Self::get_lock_method(&init.expr).is_some() {
                             if let Some(var_name) = Self::extract_var_name(&local.pat) {
                                 let line = local.span().start().line;
-                                active_guards.insert(var_name, line);
+                                block_guards.insert(var_name, line);
                             }
                         }
                     }
                 }
                 Stmt::Expr(expr, _) => {
-                    // Check for await points while guards are held
-                    if !active_guards.is_empty() {
-                        self.check_await_in_expr(expr, &active_guards);
-                    }
+                    // Combine outer guards with block guards for checking
+                    let all_guards: HashMap<String, usize> = outer_guards
+                        .iter()
+                        .chain(block_guards.iter())
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
 
-                    // Check if this is a block that might drop guards
+                    // For nested blocks, recursively analyze (handles guard scoping correctly)
+                    // Don't use check_await_in_expr for blocks to avoid double-detection
                     if let Expr::Block(block) = expr {
-                        self.analyze_block(&block.block.stmts, in_async);
+                        self.analyze_block(&block.block.stmts, in_async, &all_guards);
+                    } else if !all_guards.is_empty() {
+                        // Check for await points in non-block expressions
+                        self.check_await_in_expr(expr, &all_guards);
                     }
                 }
                 Stmt::Macro(_) => {
@@ -124,6 +139,7 @@ impl LockAcrossAwaitVisitor<'_> {
                 _ => {}
             }
         }
+        // block_guards are implicitly dropped here when the block ends
     }
 
     /// Check for await points in an expression (but not the lock acquisition await)
@@ -210,7 +226,8 @@ impl<'ast> Visit<'ast> for LockAcrossAwaitVisitor<'_> {
 
         let is_async = node.sig.asyncness.is_some();
         if is_async {
-            self.analyze_block(&node.block.stmts, true);
+            // Start with no outer guards at the function level
+            self.analyze_block(&node.block.stmts, true, &HashMap::new());
         }
 
         // Continue visiting nested functions
@@ -327,5 +344,36 @@ mod tests {
         "#;
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_detection_when_guard_scoped() {
+        // Guards dropped before await should NOT trigger warning
+        let source = r#"
+            async fn good(mutex: &tokio::sync::Mutex<i32>) {
+                {
+                    let guard = mutex.lock().await;
+                    *guard += 1;
+                } // guard dropped here
+                some_async().await; // This is safe
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(diagnostics.is_empty(), "Should not warn when guard is scoped before await");
+    }
+
+    #[test]
+    fn test_detects_guard_in_outer_scope_with_await_in_inner() {
+        // Guard in outer scope, await in inner block - should warn
+        let source = r#"
+            async fn bad(mutex: &tokio::sync::Mutex<i32>) {
+                let guard = mutex.lock().await;
+                {
+                    some_async().await; // Guard still held from outer scope
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1, "Should warn when outer guard spans inner await");
     }
 }

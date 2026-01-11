@@ -147,8 +147,9 @@ impl Fingerprint {
         }
 
         // Get 3 lines of context: line-1, line, line+1 (1-indexed)
-        let start = target_line.saturating_sub(2); // Convert to 0-indexed, go back 1
-        let end = (target_line).min(lines.len()); // target_line is 1-indexed, so this is line+1 in 0-indexed
+        // For target_line=5: want lines 4,5,6 (1-indexed) = indices 3,4,5 (0-indexed) = [3..6]
+        let start = target_line.saturating_sub(2); // line-1 in 0-indexed
+        let end = (target_line + 1).min(lines.len()); // line+1 in 0-indexed (exclusive)
 
         let mut context = String::new();
         for line in &lines[start..end] {
@@ -385,7 +386,10 @@ impl Baseline {
     }
 }
 
-/// Simple date string without chrono dependency
+/// Simple date string without chrono dependency.
+///
+/// Note: This is an approximate calculation that doesn't account for leap years
+/// or variable month lengths. It's only used for human-readable metadata timestamps.
 fn chrono_lite_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -394,13 +398,14 @@ fn chrono_lite_now() -> String {
         .unwrap_or(0);
 
     // Convert to ISO-like date string (approximate, good enough for metadata)
+    // Use saturating arithmetic to prevent overflow on extreme clock values
     let days = secs / 86400;
-    let years = 1970 + days / 365;
+    let years = 1970_u64.saturating_add(days / 365);
     let remaining_days = days % 365;
-    let month = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
+    let month = (remaining_days / 30).saturating_add(1).min(12);
+    let day = (remaining_days % 30).saturating_add(1).min(31);
 
-    format!("{:04}-{:02}-{:02}", years, month.min(12), day.min(31))
+    format!("{:04}-{:02}-{:02}", years, month, day)
 }
 
 #[cfg(test)]

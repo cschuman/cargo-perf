@@ -117,10 +117,13 @@ impl VisitorState {
     }
 
     /// Exit a loop - call at end of visit_expr_for_loop, etc.
+    ///
+    /// Uses saturating subtraction to prevent underflow if called
+    /// more times than enter_loop (indicates a visitor implementation bug).
     #[inline]
     pub fn exit_loop(&mut self) {
-        self.loop_depth -= 1;
-        self.recursion_depth -= 1;
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
     }
 
     /// Enter a nested expression - call at start of visit_expr, etc.
@@ -130,9 +133,12 @@ impl VisitorState {
     }
 
     /// Exit a nested expression - call at end of visit_expr, etc.
+    ///
+    /// Uses saturating subtraction to prevent underflow if called
+    /// more times than enter_expr (indicates a visitor implementation bug).
     #[inline]
     pub fn exit_expr(&mut self) {
-        self.recursion_depth -= 1;
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
     }
 
     /// Check if currently inside a loop.

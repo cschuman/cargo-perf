@@ -33,6 +33,13 @@ pub enum FixError {
         end: usize,
     },
 
+    #[error("overlapping replacements at bytes {first_end} and {second_start} in {path}")]
+    OverlappingReplacements {
+        path: String,
+        first_end: usize,
+        second_start: usize,
+    },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -167,6 +174,23 @@ pub fn apply_fixes(diagnostics: &[Diagnostic], base_dir: &Path) -> Result<usize,
         // Sort replacements by start_byte descending
         // This ensures later offsets are applied first, preventing offset drift
         replacements.sort_by_key(|r| std::cmp::Reverse(r.start_byte));
+
+        // Check for overlapping replacements (after sorting, adjacent entries are checked)
+        // Since sorted descending, replacements[i] has higher start_byte than replacements[i+1]
+        // Overlap occurs if replacements[i+1].end_byte > replacements[i].start_byte
+        for i in 0..replacements.len().saturating_sub(1) {
+            let current = &replacements[i];
+            let next = &replacements[i + 1];
+            // next has lower start_byte than current (due to descending sort)
+            // Overlap if next.end_byte > current.start_byte
+            if next.end_byte > current.start_byte {
+                return Err(FixError::OverlappingReplacements {
+                    path: path.display().to_string(),
+                    first_end: next.end_byte,
+                    second_start: current.start_byte,
+                });
+            }
+        }
 
         // Apply all replacements
         let mut result = content;

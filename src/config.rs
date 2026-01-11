@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use crate::Severity;
@@ -93,28 +95,37 @@ impl Config {
         };
 
         let config_path = dir_path.join("cargo-perf.toml");
-        if config_path.exists() {
-            // Check file size before reading to prevent memory exhaustion
-            let metadata = std::fs::metadata(&config_path)?;
-            if metadata.len() > MAX_CONFIG_SIZE {
-                anyhow::bail!(
-                    "Config file too large ({} bytes, max {} bytes): {}",
-                    metadata.len(),
-                    MAX_CONFIG_SIZE,
-                    config_path.display()
-                );
+
+        // Try to open the config file; if it doesn't exist, return default
+        let mut file = match File::open(&config_path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Config::default());
             }
+            Err(e) => return Err(e.into()),
+        };
 
-            let content = std::fs::read_to_string(&config_path)?;
-            let config: Config = toml::from_str(&content)?;
-
-            // Validate rule IDs against known rules
-            Self::validate_rule_ids(&config);
-
-            Ok(config)
-        } else {
-            Ok(Config::default())
+        // TOCTOU-safe: Check metadata via file descriptor, not path
+        let metadata = file.metadata()?;
+        if metadata.len() > MAX_CONFIG_SIZE {
+            anyhow::bail!(
+                "Config file too large ({} bytes, max {} bytes): {}",
+                metadata.len(),
+                MAX_CONFIG_SIZE,
+                config_path.display()
+            );
         }
+
+        // Read from the same file descriptor
+        let mut content = String::with_capacity(metadata.len() as usize);
+        file.read_to_string(&mut content)?;
+
+        let config: Config = toml::from_str(&content)?;
+
+        // Validate rule IDs against known rules
+        Self::validate_rule_ids(&config);
+
+        Ok(config)
     }
 
     /// Validate that configured rule IDs exist, warning about unknown ones.
