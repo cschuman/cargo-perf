@@ -33,6 +33,9 @@ use crate::Diagnostic;
 /// Default baseline filename
 pub const BASELINE_FILENAME: &str = ".cargo-perf-baseline";
 
+/// Maximum baseline file size (10 MB) - prevents memory exhaustion from malformed files
+const MAX_BASELINE_SIZE: u64 = 10 * 1024 * 1024;
+
 /// A fingerprint that uniquely identifies a diagnostic
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Fingerprint {
@@ -203,6 +206,19 @@ impl Baseline {
 
     /// Load a baseline from a specific path
     pub fn load_from(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        // Check file size before reading to prevent memory exhaustion
+        let metadata = fs::metadata(path.as_ref())?;
+        if metadata.len() > MAX_BASELINE_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Baseline file too large ({} bytes, max {} bytes)",
+                    metadata.len(),
+                    MAX_BASELINE_SIZE
+                ),
+            ));
+        }
+
         let content = fs::read_to_string(path.as_ref())?;
         let mut baseline: Baseline = serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

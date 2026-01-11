@@ -4,6 +4,9 @@ use std::path::Path;
 
 use crate::Severity;
 
+/// Maximum config file size (1 MB) - prevents memory exhaustion from malformed files
+const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -91,6 +94,17 @@ impl Config {
 
         let config_path = dir_path.join("cargo-perf.toml");
         if config_path.exists() {
+            // Check file size before reading to prevent memory exhaustion
+            let metadata = std::fs::metadata(&config_path)?;
+            if metadata.len() > MAX_CONFIG_SIZE {
+                anyhow::bail!(
+                    "Config file too large ({} bytes, max {} bytes): {}",
+                    metadata.len(),
+                    MAX_CONFIG_SIZE,
+                    config_path.display()
+                );
+            }
+
             let content = std::fs::read_to_string(&config_path)?;
             let config: Config = toml::from_str(&content)?;
 

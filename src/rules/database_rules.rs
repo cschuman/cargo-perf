@@ -108,6 +108,9 @@ const SEAORM_AMBIGUOUS_METHODS: &[&str] = &["one", "all", "find"];
 /// Entity operations that need receiver validation
 const AMBIGUOUS_OPERATIONS: &[&str] = &["insert", "update", "delete", "save", "execute"];
 
+/// Maximum recursion depth for looks_like_db_operation to prevent stack overflow
+const MAX_DB_CHECK_DEPTH: usize = 64;
+
 /// Diesel table operations
 const DIESEL_OPERATIONS: &[&str] = &["insert_into", "update", "delete"];
 
@@ -212,7 +215,7 @@ impl NPlusOneVisitor<'_> {
         // For ambiguous methods, require validation to prevent false positives
         // (e.g., Vec::first(), HashMap::insert(), Iterator::find())
         // We check the receiver OR if args look like DB connection
-        let receiver_looks_like_db = Self::looks_like_db_operation(receiver);
+        let receiver_looks_like_db = Self::looks_like_db_operation(receiver, 0);
         let args_look_like_db = Self::has_db_connection_arg(args);
 
         if !receiver_looks_like_db && !args_look_like_db {
@@ -300,7 +303,14 @@ impl NPlusOneVisitor<'_> {
     /// Returns true if the expression appears to be:
     /// - A method chain containing database-related methods (query, find, filter, etc.)
     /// - A function call to a database function (sqlx::query, etc.)
-    fn looks_like_db_operation(receiver: &Expr) -> bool {
+    ///
+    /// The `depth` parameter prevents stack overflow on deeply nested expressions.
+    fn looks_like_db_operation(receiver: &Expr, depth: usize) -> bool {
+        // Prevent stack overflow on deeply nested expressions
+        if depth > MAX_DB_CHECK_DEPTH {
+            return false;
+        }
+
         match receiver {
             // Check method chains: e.g., query(...).bind(...).fetch_one()
             Expr::MethodCall(method_call) => {
@@ -325,7 +335,7 @@ impl NPlusOneVisitor<'_> {
                     return true;
                 }
                 // Recursively check the receiver chain
-                Self::looks_like_db_operation(&method_call.receiver)
+                Self::looks_like_db_operation(&method_call.receiver, depth + 1)
             }
             // Check function calls: e.g., sqlx::query("..."), User::find_by_id(id)
             Expr::Call(call) => {
@@ -381,9 +391,9 @@ impl NPlusOneVisitor<'_> {
                     || path_str.contains("table")
             }
             // Check await expressions (common in async db code)
-            Expr::Await(await_expr) => Self::looks_like_db_operation(&await_expr.base),
+            Expr::Await(await_expr) => Self::looks_like_db_operation(&await_expr.base, depth + 1),
             // Check try expressions (?)
-            Expr::Try(try_expr) => Self::looks_like_db_operation(&try_expr.expr),
+            Expr::Try(try_expr) => Self::looks_like_db_operation(&try_expr.expr, depth + 1),
             // For other expressions, be conservative
             _ => false,
         }

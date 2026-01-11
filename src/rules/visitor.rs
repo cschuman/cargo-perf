@@ -1,6 +1,89 @@
 //! Shared visitor utilities for rule implementations.
 //!
 //! Provides loop-tracking and recursion depth limiting to prevent stack overflow.
+//!
+//! # Macros
+//!
+//! The `impl_loop_tracking_visitor!` macro generates boilerplate Visit trait methods
+//! for tracking loop depth and recursion. Use it to reduce repetitive code in rules.
+
+/// Macro to implement loop-tracking visitor methods.
+///
+/// This macro generates the standard Visit trait implementations for
+/// `visit_expr_for_loop`, `visit_expr_while`, `visit_expr_loop`, and `visit_expr`
+/// that properly track loop and recursion depth using `VisitorState`.
+///
+/// # Requirements
+///
+/// The visitor struct must have a field named `state` of type `VisitorState`.
+///
+/// # Example
+///
+/// ```ignore
+/// use syn::visit::Visit;
+/// use crate::rules::visitor::{VisitorState, impl_loop_tracking_visitor};
+///
+/// struct MyVisitor<'a> {
+///     ctx: &'a AnalysisContext<'a>,
+///     diagnostics: Vec<Diagnostic>,
+///     state: VisitorState,
+/// }
+///
+/// impl_loop_tracking_visitor!(MyVisitor<'a>);
+///
+/// impl<'ast> Visit<'ast> for MyVisitor<'_> {
+///     impl_loop_tracking_visitor!(@methods);
+///
+///     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+///         // Your custom logic here
+///         syn::visit::visit_expr_method_call(self, node);
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! impl_loop_tracking_visitor {
+    // Generate all loop tracking methods for use in a Visit impl block
+    (@methods) => {
+        fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+            if self.state.should_bail() {
+                return;
+            }
+            self.state.enter_loop();
+            syn::visit::visit_expr_for_loop(self, node);
+            self.state.exit_loop();
+        }
+
+        fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+            if self.state.should_bail() {
+                return;
+            }
+            self.state.enter_loop();
+            syn::visit::visit_expr_while(self, node);
+            self.state.exit_loop();
+        }
+
+        fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+            if self.state.should_bail() {
+                return;
+            }
+            self.state.enter_loop();
+            syn::visit::visit_expr_loop(self, node);
+            self.state.exit_loop();
+        }
+
+        fn visit_expr(&mut self, node: &'ast syn::Expr) {
+            if self.state.should_bail() {
+                return;
+            }
+            self.state.enter_expr();
+            syn::visit::visit_expr(self, node);
+            self.state.exit_expr();
+        }
+    };
+}
+
+// Re-export macro at crate level
+pub use impl_loop_tracking_visitor;
 
 /// Maximum recursion depth for AST visitors.
 /// Protects against maliciously crafted deeply-nested code.

@@ -10,9 +10,29 @@ use crate::error::{Error, Result};
 use crate::rules::{Diagnostic, Rule};
 use crate::suppression::SuppressionExtractor;
 use crate::Config;
+use std::any::Any;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+
+/// Extract a human-readable message from a panic payload.
+///
+/// Panic payloads can be String, &str, or other types. This function
+/// attempts to extract a useful message from common panic payload types.
+fn extract_panic_message(payload: &Box<dyn Any + Send>) -> String {
+    // Try to extract &str
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+
+    // Try to extract String
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+
+    // Fallback for unknown types
+    "(unknown panic payload)".to_string()
+}
 
 /// Read a file with TOCTOU-safe handling.
 ///
@@ -115,11 +135,14 @@ where
         let rule_diagnostics =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rule.check(&ctx))) {
                 Ok(diags) => diags,
-                Err(_) => {
+                Err(panic_payload) => {
+                    // Extract panic message from the payload
+                    let panic_msg = extract_panic_message(&panic_payload);
                     eprintln!(
-                        "Warning: Rule '{}' panicked while analyzing {}",
+                        "Warning: Rule '{}' panicked while analyzing {}: {}",
                         rule.id(),
-                        file_path.display()
+                        file_path.display(),
+                        panic_msg
                     );
                     continue;
                 }

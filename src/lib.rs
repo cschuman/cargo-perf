@@ -104,7 +104,7 @@ pub mod suppression;
 
 pub use baseline::Baseline;
 pub use config::Config;
-pub use engine::{AnalysisContext, Engine};
+pub use engine::{AnalysisContext, AnalysisProgress, Engine};
 pub use error::{Error, Result};
 pub use fix::FixError;
 pub use plugin::{analyze_with_plugins, PluginRegistry, PluginRegistryBuilder};

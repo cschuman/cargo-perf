@@ -13,10 +13,22 @@ use crate::rules::{registry, Diagnostic};
 use crate::Config;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 pub struct Engine<'a> {
     config: &'a Config,
+}
+
+/// Progress information for streaming analysis.
+#[derive(Debug, Clone)]
+pub struct AnalysisProgress {
+    /// Number of files analyzed so far
+    pub files_analyzed: usize,
+    /// Total number of files to analyze
+    pub total_files: usize,
+    /// Number of diagnostics found so far
+    pub diagnostics_found: usize,
 }
 
 impl<'a> Engine<'a> {
@@ -25,16 +37,48 @@ impl<'a> Engine<'a> {
     }
 
     pub fn analyze(&self, path: &Path) -> Result<Vec<Diagnostic>> {
+        self.analyze_with_progress(path, |_| {})
+    }
+
+    /// Analyze with progress callback for streaming feedback.
+    ///
+    /// The callback is invoked after each file is analyzed, providing
+    /// progress information. This enables UI feedback during long analyses
+    /// without requiring full architectural changes.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to analyze (file or directory)
+    /// * `progress_callback` - Called after each file with current progress
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// engine.analyze_with_progress(path, |progress| {
+    ///     eprintln!("Progress: {}/{} files, {} issues",
+    ///         progress.files_analyzed,
+    ///         progress.total_files,
+    ///         progress.diagnostics_found);
+    /// })?;
+    /// ```
+    pub fn analyze_with_progress<F>(&self, path: &Path, progress_callback: F) -> Result<Vec<Diagnostic>>
+    where
+        F: Fn(AnalysisProgress) + Send + Sync,
+    {
         // First, collect all valid file paths (sequential - fast)
         let files = self.collect_files(path);
+        let total_files = files.len();
 
-        // Analyze files in parallel
+        // Shared counters for progress tracking
+        let files_analyzed = AtomicUsize::new(0);
+        let diagnostics_found = AtomicUsize::new(0);
         let errors: Mutex<Vec<(PathBuf, Error)>> = Mutex::new(Vec::new());
 
+        // Analyze files in parallel
         let all_diagnostics: Vec<Diagnostic> = files
             .par_iter()
             .flat_map(|file_path| {
-                match self.analyze_file(file_path) {
+                let result = match self.analyze_file(file_path) {
                     Ok(diagnostics) => diagnostics,
                     Err(e) => {
                         // Collect errors but continue analyzing other files
@@ -43,7 +87,19 @@ impl<'a> Engine<'a> {
                         }
                         Vec::new()
                     }
-                }
+                };
+
+                // Update progress
+                let analyzed = files_analyzed.fetch_add(1, Ordering::Relaxed) + 1;
+                let found = diagnostics_found.fetch_add(result.len(), Ordering::Relaxed) + result.len();
+
+                progress_callback(AnalysisProgress {
+                    files_analyzed: analyzed,
+                    total_files,
+                    diagnostics_found: found,
+                });
+
+                result
             })
             .collect();
 

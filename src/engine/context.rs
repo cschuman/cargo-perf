@@ -237,4 +237,56 @@ mod tests {
         // Line beyond file returns None
         assert_eq!(index.byte_offset(100, 1), None);
     }
+
+    #[test]
+    fn test_span_to_byte_range() {
+        use crate::Config;
+
+        // Simple source with known positions
+        let source = "fn foo() {}";
+        let ast = syn::parse_file(source).expect("Failed to parse");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(std::path::Path::new("test.rs"), source, &ast, &config);
+
+        // Get the span of the function name "foo"
+        if let syn::Item::Fn(item_fn) = &ast.items[0] {
+            let ident_span = item_fn.sig.ident.span();
+            let (start, end) = ctx.span_to_byte_range(ident_span).unwrap();
+
+            // "foo" starts at position 3 (after "fn ") and ends at position 6
+            assert_eq!(start, 3, "Start byte should be 3");
+            assert_eq!(end, 6, "End byte should be 6");
+
+            // Verify by extracting the text
+            let extracted = &source[start..end];
+            assert_eq!(extracted, "foo", "Extracted text should be 'foo'");
+        } else {
+            panic!("Expected a function item");
+        }
+    }
+
+    #[test]
+    fn test_span_to_byte_range_multiline() {
+        use crate::Config;
+
+        // Multiline source
+        let source = "fn test() {\n    let x = 1;\n}";
+        let ast = syn::parse_file(source).expect("Failed to parse");
+        let config = Config::default();
+        let ctx = AnalysisContext::new(std::path::Path::new("test.rs"), source, &ast, &config);
+
+        // Get the span of the local variable "x"
+        if let syn::Item::Fn(item_fn) = &ast.items[0] {
+            if let syn::Stmt::Local(local) = &item_fn.block.stmts[0] {
+                if let syn::Pat::Ident(pat_ident) = &local.pat {
+                    let ident_span = pat_ident.ident.span();
+                    let (start, end) = ctx.span_to_byte_range(ident_span).unwrap();
+
+                    // Extract and verify
+                    let extracted = &source[start..end];
+                    assert_eq!(extracted, "x", "Extracted text should be 'x'");
+                }
+            }
+        }
+    }
 }
