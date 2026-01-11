@@ -1,5 +1,5 @@
 use super::visitor::VisitorState;
-use super::{Diagnostic, Fix, Replacement, Rule, Severity};
+use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
 use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ItemFn, Member};
@@ -167,6 +167,12 @@ impl UnboundedChannelVisitor<'_> {
                 if let Expr::Path(ExprPath { path, .. }) = &*node.func {
                     let path_span = path.span();
                     let (path_start, path_end) = self.ctx.span_to_byte_range(path_span)?;
+
+                    // Skip fix generation for very large expressions
+                    let path_size = path_end.saturating_sub(path_start);
+                    if path_size > MAX_FIX_TEXT_SIZE {
+                        return None;
+                    }
 
                     // Build the new path by replacing the function name
                     let original_path = self.ctx.source.get(path_start..path_end)?;
@@ -672,7 +678,7 @@ impl AsyncBlockingVisitor<'_> {
         &mut self,
         full_path: &str,
         span: proc_macro2::Span,
-        path_span: Option<proc_macro2::Span>,
+        call_node: Option<&ExprCall>,
     ) {
         // Find the best (most specific) match
         let mut best_match: Option<(&str, &str, &str)> = None;
@@ -699,13 +705,13 @@ impl AsyncBlockingVisitor<'_> {
             let column = span.start().column;
 
             // Try to generate a fix for function calls (not method calls)
-            let fix = path_span.and_then(|ps| self.generate_blocking_fix(ps, alternative));
+            let fix = call_node.and_then(|node| self.generate_blocking_fix(node, alternative));
 
             self.diagnostics.push(Diagnostic {
                 rule_id: "async-block-in-async",
                 severity: Severity::Error,
                 message: format!(
-                    "Blocking call `{}` inside async function. Use `{}` instead.",
+                    "Blocking call `{}` inside async function. Use `{}.await` instead.",
                     func_name, alternative
                 ),
                 file_path: self.ctx.file_path.to_path_buf(),
@@ -713,27 +719,44 @@ impl AsyncBlockingVisitor<'_> {
                 column,
                 end_line: None,
                 end_column: None,
-                suggestion: Some(format!("Replace with `{}`", alternative)),
+                suggestion: Some(format!("Replace with `{}.await`", alternative)),
                 fix,
             });
         }
     }
 
-    /// Generate a fix by replacing the function path with the async alternative.
-    fn generate_blocking_fix(
-        &self,
-        path_span: proc_macro2::Span,
-        alternative: &str,
-    ) -> Option<Fix> {
-        let (start, end) = self.ctx.span_to_byte_range(path_span)?;
+    /// Generate a fix by replacing the entire call expression with the async alternative + .await.
+    fn generate_blocking_fix(&self, node: &ExprCall, alternative: &str) -> Option<Fix> {
+        use syn::spanned::Spanned;
+
+        // Get the full call span (function + args)
+        let call_span = node.span();
+        let (call_start, call_end) = self.ctx.span_to_byte_range(call_span)?;
+
+        // Skip fix generation for very large expressions
+        let call_size = call_end.saturating_sub(call_start);
+        if call_size > MAX_FIX_TEXT_SIZE {
+            return None;
+        }
+
+        // Get the original arguments from the source
+        // We need to find the args portion (everything after the function path, including parens)
+        let original_call = self.ctx.source.get(call_start..call_end)?;
+
+        // Find the opening paren - args start from there
+        let paren_pos = original_call.find('(')?;
+        let args_with_parens = &original_call[paren_pos..];
+
+        // Build the new call: alternative + args + .await
+        let new_text = format!("{}{}.await", alternative, args_with_parens);
 
         Some(Fix {
-            description: format!("Replace with `{}`", alternative),
+            description: format!("Replace with `{}.await`", alternative),
             replacements: vec![Replacement {
                 file_path: self.ctx.file_path.to_path_buf(),
-                start_byte: start,
-                end_byte: end,
-                new_text: alternative.to_string(),
+                start_byte: call_start,
+                end_byte: call_end,
+                new_text,
             }],
         })
     }
@@ -765,7 +788,6 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         if self.in_async_fn {
             // Extract the function path
             if let Expr::Path(ExprPath { path, .. }) = &*node.func {
-                use syn::spanned::Spanned;
                 let path_str = path
                     .segments
                     .iter()
@@ -777,9 +799,8 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
                     .first()
                     .map(|s| s.ident.span())
                     .unwrap_or_else(proc_macro2::Span::call_site);
-                // Pass the full path span for fix generation
-                let path_span = path.span();
-                self.check_blocking_call_with_fix(&path_str, display_span, Some(path_span));
+                // Pass the full call node for fix generation (to include args and add .await)
+                self.check_blocking_call_with_fix(&path_str, display_span, Some(node));
             }
         }
         syn::visit::visit_expr_call(self, node);
@@ -1227,8 +1248,8 @@ mod tests {
         );
 
         assert!(
-            result.contains("tokio::fs::read_to_string"),
-            "Fix should use tokio alternative: {}",
+            result.contains("tokio::fs::read_to_string(\"file.txt\").await"),
+            "Fix should use tokio alternative with .await: {}",
             result
         );
         assert!(
@@ -1254,8 +1275,8 @@ mod tests {
         );
 
         assert!(
-            result.contains("tokio::time::sleep"),
-            "Fix should use tokio sleep: {}",
+            result.contains("tokio::time::sleep(std::time::Duration::from_secs(1)).await"),
+            "Fix should use tokio sleep with .await: {}",
             result
         );
         assert!(

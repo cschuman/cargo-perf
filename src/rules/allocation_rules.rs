@@ -1,7 +1,7 @@
 //! Rules for detecting allocation anti-patterns.
 
 use super::visitor::VisitorState;
-use super::{Diagnostic, Fix, Replacement, Rule, Severity};
+use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
@@ -146,12 +146,13 @@ fn is_vec_new(expr: &Expr) -> bool {
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
-                path_str.ends_with("Vec::new") || path_str == "new"
+                // Only match Vec::new, not bare "new" (which could be any type)
+                path_str.ends_with("Vec::new")
             } else {
                 false
             }
         }
-        Expr::MethodCall(call) => call.method == "new",
+        // Removed: MethodCall branch that matched any .new() call
         _ => false,
     }
 }
@@ -295,13 +296,13 @@ fn is_hashmap_new(expr: &Expr) -> bool {
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
+                // Only match HashMap::new, not bare "new" (which could be any type)
                 path_str.ends_with("HashMap::new")
-                    || (path_str == "new" && path.segments.len() == 1)
             } else {
                 false
             }
         }
-        Expr::MethodCall(call) => call.method == "new",
+        // Removed: MethodCall branch that matched any .new() call
         _ => false,
     }
 }
@@ -448,12 +449,13 @@ fn is_string_new(expr: &Expr) -> bool {
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
+                // Only match String::new
                 path_str.ends_with("String::new")
             } else {
                 false
             }
         }
-        Expr::MethodCall(call) => call.method == "new",
+        // Removed: MethodCall branch that matched any .new() call
         _ => false,
     }
 }
@@ -702,6 +704,13 @@ impl StringConcatVisitor<'_> {
         // Get the right-hand expression as source text
         let rhs_span = node.right.span();
         let (rhs_start, rhs_end) = self.ctx.span_to_byte_range(rhs_span)?;
+
+        // Skip fix generation for very large expressions
+        let rhs_size = rhs_end.saturating_sub(rhs_start);
+        if rhs_size > MAX_FIX_TEXT_SIZE {
+            return None;
+        }
+
         let rhs_text = self.ctx.source.get(rhs_start..rhs_end)?;
 
         // Get the full expression span for replacement
@@ -1278,5 +1287,94 @@ mod tests {
         let diagnostics = check_mutex_loop(source);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("read"));
+    }
+
+    // Test for false positive prevention - custom types with .new() should NOT be flagged
+    #[test]
+    fn test_no_false_positive_custom_new() {
+        // Custom type with new() should NOT trigger Vec rule
+        let source = r#"
+            struct MyType;
+            impl MyType { fn new() -> Self { MyType } }
+            fn test() {
+                let mut x = MyType::new();
+                for i in 0..10 {
+                    // Do something with x
+                }
+            }
+        "#;
+        let diagnostics = check_vec_capacity(source);
+        assert!(diagnostics.is_empty(), "Should not flag custom types");
+    }
+
+    #[test]
+    fn test_no_false_positive_builder_new() {
+        // Builder pattern with new() should NOT be flagged
+        let source = r#"
+            struct Builder;
+            impl Builder {
+                fn new() -> Self { Builder }
+                fn add(&mut self, _: i32) {}
+            }
+            fn test() {
+                let mut builder = Builder::new();
+                for i in 0..10 {
+                    builder.add(i);
+                }
+            }
+        "#;
+        let diagnostics = check_hashmap_capacity(source);
+        assert!(diagnostics.is_empty(), "Should not flag Builder::new()");
+        let diagnostics = check_string_capacity(source);
+        assert!(diagnostics.is_empty(), "Should not flag Builder::new()");
+    }
+
+    // Test for while loop variations
+    #[test]
+    fn test_vec_in_while_loop() {
+        let source = r#"
+            fn test() {
+                let mut v = Vec::new();
+                let mut i = 0;
+                while i < 100 {
+                    v.push(i);
+                    i += 1;
+                }
+            }
+        "#;
+        let diagnostics = check_vec_capacity(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_hashmap_in_while_loop() {
+        let source = r#"
+            use std::collections::HashMap;
+            fn test() {
+                let mut map = HashMap::new();
+                let mut i = 0;
+                while i < 100 {
+                    map.insert(i, i * 2);
+                    i += 1;
+                }
+            }
+        "#;
+        let diagnostics = check_hashmap_capacity(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_string_in_loop_loop() {
+        let source = r#"
+            fn test() {
+                let mut s = String::new();
+                loop {
+                    s.push_str("x");
+                    if s.len() > 10 { break; }
+                }
+            }
+        "#;
+        let diagnostics = check_string_capacity(source);
+        assert_eq!(diagnostics.len(), 1);
     }
 }

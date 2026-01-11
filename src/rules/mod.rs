@@ -11,6 +11,11 @@ use crate::engine::AnalysisContext;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Maximum size (in bytes) for extracted source text in auto-fixes.
+/// This prevents memory issues when generating fixes for very large expressions.
+/// Any expression larger than this will not have an auto-fix generated.
+pub const MAX_FIX_TEXT_SIZE: usize = 10 * 1024; // 10 KB
+
 /// Severity levels for diagnostics
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]

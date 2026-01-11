@@ -64,12 +64,13 @@ impl LineIndex {
 
     /// Convert (line, column) to byte offset. Both are 1-indexed.
     ///
-    /// Returns None if line is out of bounds.
+    /// Returns None if line is out of bounds or if the result would overflow.
     /// Column is clamped to line length if too large.
     pub fn byte_offset(&self, line: usize, column: usize) -> Option<usize> {
         let line_start = self.line_start(line)?;
         // Column is 1-indexed, so subtract 1
-        Some(line_start + column.saturating_sub(1))
+        // Use checked_add to prevent overflow on malicious/malformed input
+        line_start.checked_add(column.saturating_sub(1))
     }
 }
 
@@ -205,5 +206,35 @@ mod tests {
         assert_eq!(index.line_start(2), Some(6));
         assert_eq!(index.line_start(3), Some(12));
         assert_eq!(index.line_start(4), None);
+    }
+
+    #[test]
+    fn test_byte_offset_overflow_protection() {
+        let source = "hello";
+        let index = LineIndex::new(source);
+
+        // Normal case should work
+        assert_eq!(index.byte_offset(1, 1), Some(0));
+        assert_eq!(index.byte_offset(1, 3), Some(2));
+
+        // Very large column with saturating_sub(1) doesn't overflow but returns a large value
+        // This tests that we don't panic on extreme inputs
+        let result = index.byte_offset(1, usize::MAX);
+        assert!(result.is_some()); // Doesn't overflow since line_start=0
+
+        // Edge case: column 0 is treated as column 1 (saturating_sub prevents underflow)
+        assert_eq!(index.byte_offset(1, 0), Some(0));
+    }
+
+    #[test]
+    fn test_byte_offset_invalid_line() {
+        let source = "hello";
+        let index = LineIndex::new(source);
+
+        // Line 0 is clamped to line 1 due to saturating_sub (same as line_start behavior)
+        assert_eq!(index.byte_offset(0, 1), Some(0));
+
+        // Line beyond file returns None
+        assert_eq!(index.byte_offset(100, 1), None);
     }
 }

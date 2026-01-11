@@ -49,6 +49,28 @@ runs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Validate inputs
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        # Validate path - only allow safe characters
+        if [[ ! "$INPUT_PATH" =~ ^[a-zA-Z0-9_./-]+$ ]]; then
+          echo "::error::Invalid path format. Only alphanumeric characters, dots, underscores, hyphens, and slashes are allowed."
+          exit 1
+        fi
+
+        # Validate version - must be 'latest' or semver format
+        if [ "$INPUT_VERSION" != "latest" ]; then
+          if [[ ! "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version format. Use 'latest' or semver (e.g., '0.5.6')."
+            exit 1
+          fi
+        fi
+
+        echo "Inputs validated successfully"
+
     - name: Cache cargo-perf
       uses: actions/cache@v4
       with:
@@ -57,33 +79,40 @@ runs:
 
     - name: Install cargo-perf
       shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
       run: |
-        if [ "${{ inputs.version }}" = "latest" ]; then
+        if [ "$INPUT_VERSION" = "latest" ]; then
           cargo install cargo-perf --locked
         else
-          cargo install cargo-perf --version "${{ inputs.version }}" --locked
+          cargo install cargo-perf --version "$INPUT_VERSION" --locked
         fi
 
     - name: Run analysis
       id: analyze
       shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        INPUT_FAIL_ON_WARNING: ${{ inputs.fail-on-warning }}
       run: |
         set +e
 
-        # Run cargo-perf and capture output
-        if [ "${{ inputs.sarif }}" = "true" ]; then
-          cargo perf check "${{ inputs.path }}" --format sarif > results.sarif 2>&1
+        # Run cargo-perf and capture output (using validated env vars)
+        if [ "$INPUT_SARIF" = "true" ]; then
+          cargo perf check "$INPUT_PATH" --format sarif > results.sarif 2>&1
           EXIT_CODE=$?
         else
-          OUTPUT=$(cargo perf check "${{ inputs.path }}" --format json 2>&1)
+          OUTPUT=$(cargo perf check "$INPUT_PATH" --format json 2>&1)
           EXIT_CODE=$?
         fi
 
         # Parse results for GitHub output
-        if [ "${{ inputs.sarif }}" = "true" ] && [ -f results.sarif ]; then
+        if [ "$INPUT_SARIF" = "true" ] && [ -f results.sarif ]; then
           # Count issues from SARIF
-          ERRORS=$(cat results.sarif | jq '[.runs[0].results[] | select(.level == "error")] | length' 2>/dev/null || echo "0")
-          WARNINGS=$(cat results.sarif | jq '[.runs[0].results[] | select(.level == "warning")] | length' 2>/dev/null || echo "0")
+          ERRORS=$(jq '[.runs[0].results[] | select(.level == "error")] | length' results.sarif 2>/dev/null || echo "0")
+          WARNINGS=$(jq '[.runs[0].results[] | select(.level == "warning")] | length' results.sarif 2>/dev/null || echo "0")
           TOTAL=$((ERRORS + WARNINGS))
         else
           ERRORS=0
@@ -106,10 +135,10 @@ runs:
 
         # Determine exit code based on settings
         SHOULD_FAIL=0
-        if [ "${{ inputs.fail-on-error }}" = "true" ] && [ "$ERRORS" -gt 0 ]; then
+        if [ "$INPUT_FAIL_ON_ERROR" = "true" ] && [ "$ERRORS" -gt 0 ]; then
           SHOULD_FAIL=1
         fi
-        if [ "${{ inputs.fail-on-warning }}" = "true" ] && [ "$WARNINGS" -gt 0 ]; then
+        if [ "$INPUT_FAIL_ON_WARNING" = "true" ] && [ "$WARNINGS" -gt 0 ]; then
           SHOULD_FAIL=1
         fi
 
@@ -130,15 +159,17 @@ runs:
 
     - name: Check failure threshold
       shell: bash
+      env:
+        ERRORS: ${{ steps.analyze.outputs.errors-found }}
+        WARNINGS: ${{ steps.analyze.outputs.warnings-found }}
+        INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        INPUT_FAIL_ON_WARNING: ${{ inputs.fail-on-warning }}
       run: |
-        ERRORS=${{ steps.analyze.outputs.errors-found }}
-        WARNINGS=${{ steps.analyze.outputs.warnings-found }}
-
-        if [ "${{ inputs.fail-on-error }}" = "true" ] && [ "$ERRORS" -gt 0 ]; then
+        if [ "$INPUT_FAIL_ON_ERROR" = "true" ] && [ "$ERRORS" -gt 0 ]; then
           echo "::error::Found $ERRORS error(s)"
           exit 1
         fi
-        if [ "${{ inputs.fail-on-warning }}" = "true" ] && [ "$WARNINGS" -gt 0 ]; then
+        if [ "$INPUT_FAIL_ON_WARNING" = "true" ] && [ "$WARNINGS" -gt 0 ]; then
           echo "::error::Found $WARNINGS warning(s)"
           exit 1
         fi
