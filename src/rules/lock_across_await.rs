@@ -359,7 +359,10 @@ mod tests {
             }
         "#;
         let diagnostics = check_code(source);
-        assert!(diagnostics.is_empty(), "Should not warn when guard is scoped before await");
+        assert!(
+            diagnostics.is_empty(),
+            "Should not warn when guard is scoped before await"
+        );
     }
 
     #[test]
@@ -374,6 +377,10 @@ mod tests {
             }
         "#;
         let diagnostics = check_code(source);
-        assert_eq!(diagnostics.len(), 1, "Should warn when outer guard spans inner await");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Should warn when outer guard spans inner await"
+        );
     }
 }

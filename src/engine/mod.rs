@@ -61,7 +61,11 @@ impl<'a> Engine<'a> {
     ///         progress.diagnostics_found);
     /// })?;
     /// ```
-    pub fn analyze_with_progress<F>(&self, path: &Path, progress_callback: F) -> Result<Vec<Diagnostic>>
+    pub fn analyze_with_progress<F>(
+        &self,
+        path: &Path,
+        progress_callback: F,
+    ) -> Result<Vec<Diagnostic>>
     where
         F: Fn(AnalysisProgress) + Send + Sync,
     {
@@ -91,7 +95,8 @@ impl<'a> Engine<'a> {
 
                 // Update progress
                 let analyzed = files_analyzed.fetch_add(1, Ordering::Relaxed) + 1;
-                let found = diagnostics_found.fetch_add(result.len(), Ordering::Relaxed) + result.len();
+                let found =
+                    diagnostics_found.fetch_add(result.len(), Ordering::Relaxed) + result.len();
 
                 progress_callback(AnalysisProgress {
                     files_analyzed: analyzed,
