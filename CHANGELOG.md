@@ -2,6 +2,29 @@
 
 All notable changes to cargo-perf will be documented in this file.
 
+## [0.6.0] - 2026-01-12
+
+### Added
+- **GitHub Action**: Official CI integration via `action.yml`
+  - SARIF upload to GitHub Code Scanning for inline annotations
+  - Configurable fail thresholds and outputs
+  - Example workflow template included
+- **New rules** (14 total, up from 12):
+  - `hashmap-no-capacity`: Detects `HashMap::new()` followed by insert in loop
+  - `string-no-capacity`: Detects `String::new()` followed by push_str in loop
+- **New auto-fixes**:
+  - `unbounded-channel`: Replaces with bounded alternatives (`sync_channel`, `channel`)
+  - `async-block-in-async`: Replaces std blocking calls with tokio equivalents
+
+### Changed
+- Updated all dependencies to latest versions
+- CI: Bumped actions/cache to v5 and actions/checkout to v6
+
+### Fixed
+- Security and architecture improvements from code review
+- Use `from_ref` instead of slice clone for new clippy lint
+- Replace deprecated `cargo_bin` with `cargo_bin_cmd!` macro
+
 ## [0.5.5] - 2025-01-08
 
 ### Fixed
