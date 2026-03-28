@@ -28,3 +28,4 @@ tarpaulin-report.html
 # Editor backups
 *~
 \#*\#
+.claude/
