@@ -145,35 +145,34 @@ impl LockAcrossAwaitVisitor<'_> {
     /// Check for await points in an expression (but not the lock acquisition await)
     fn check_await_in_expr(&mut self, expr: &Expr, guards: &HashMap<String, usize>) {
         match expr {
-            Expr::Await(await_expr) => {
-                // Don't flag the await that's part of lock acquisition
-                if Self::get_lock_method(&await_expr.base).is_none() {
-                    let guard_names: Vec<_> = guards.keys().cloned().collect();
-                    let span = await_expr.await_token.span;
-                    let line = span.start().line;
-                    let column = span.start().column;
+            Expr::Await(await_expr)
+                if Self::get_lock_method(&await_expr.base).is_none() =>
+            {
+                let guard_names: Vec<_> = guards.keys().cloned().collect();
+                let span = await_expr.await_token.span;
+                let line = span.start().line;
+                let column = span.start().column;
 
-                    self.diagnostics.push(Diagnostic {
-                        rule_id: "lock-across-await",
-                        severity: Severity::Error,
-                        message: format!(
-                            "Lock guard{} `{}` held across `.await` point; this can cause deadlocks",
-                            if guard_names.len() > 1 { "s" } else { "" },
-                            guard_names.join("`, `")
-                        ),
-                        file_path: self.ctx.file_path.to_path_buf(),
-                        line,
-                        column,
-                        end_line: None,
-                        end_column: None,
-                        suggestion: Some(
-                            "Drop the guard before awaiting, or restructure to avoid holding locks across await points. \
-                            Consider using a scope block: `{ let guard = lock.lock(); /* use guard */ }` before the await."
-                                .to_string(),
-                        ),
-                        fix: None,
-                    });
-                }
+                self.diagnostics.push(Diagnostic {
+                    rule_id: "lock-across-await",
+                    severity: Severity::Error,
+                    message: format!(
+                        "Lock guard{} `{}` held across `.await` point; this can cause deadlocks",
+                        if guard_names.len() > 1 { "s" } else { "" },
+                        guard_names.join("`, `")
+                    ),
+                    file_path: self.ctx.file_path.to_path_buf(),
+                    line,
+                    column,
+                    end_line: None,
+                    end_column: None,
+                    suggestion: Some(
+                        "Drop the guard before awaiting, or restructure to avoid holding locks across await points. \
+                        Consider using a scope block: `{ let guard = lock.lock(); /* use guard */ }` before the await."
+                            .to_string(),
+                    ),
+                    fix: None,
+                });
             }
             Expr::Block(block) => {
                 // Analyze nested block - guards from outer scope are still active

@@ -649,33 +649,32 @@ impl<'ast> Visit<'ast> for StringConcatVisitor<'_> {
         if self.state.in_loop() {
             // Check for + or += with strings
             match &node.op {
-                syn::BinOp::Add(_) | syn::BinOp::AddAssign(_) => {
-                    // Check if either operand looks like a string operation
-                    if is_likely_string_expr(&node.left) || is_likely_string_expr(&node.right) {
-                        let span = match &node.op {
-                            syn::BinOp::Add(t) => t.span,
-                            syn::BinOp::AddAssign(t) => t.spans[0],
-                            _ => proc_macro2::Span::call_site(),
-                        };
-                        let line = span.start().line;
-                        let column = span.start().column;
+                syn::BinOp::Add(_) | syn::BinOp::AddAssign(_)
+                    if is_likely_string_expr(&node.left) || is_likely_string_expr(&node.right) =>
+                {
+                    let span = match &node.op {
+                        syn::BinOp::Add(t) => t.span,
+                        syn::BinOp::AddAssign(t) => t.spans[0],
+                        _ => proc_macro2::Span::call_site(),
+                    };
+                    let line = span.start().line;
+                    let column = span.start().column;
 
-                        // Try to generate fix for += case
-                        let fix = self.generate_string_concat_fix(node);
+                    // Try to generate fix for += case
+                    let fix = self.generate_string_concat_fix(node);
 
-                        self.diagnostics.push(Diagnostic {
-                            rule_id: "string-concat-loop",
-                            severity: Severity::Warning,
-                            message: "String concatenation with `+` inside loop; allocates new String each time".to_string(),
-                            file_path: self.ctx.file_path.to_path_buf(),
-                            line,
-                            column,
-                            end_line: None,
-                            end_column: None,
-                            suggestion: Some("Use `String::push_str()` or `write!()` to a buffer instead".to_string()),
-                            fix,
-                        });
-                    }
+                    self.diagnostics.push(Diagnostic {
+                        rule_id: "string-concat-loop",
+                        severity: Severity::Warning,
+                        message: "String concatenation with `+` inside loop; allocates new String each time".to_string(),
+                        file_path: self.ctx.file_path.to_path_buf(),
+                        line,
+                        column,
+                        end_line: None,
+                        end_column: None,
+                        suggestion: Some("Use `String::push_str()` or `write!()` to a buffer instead".to_string()),
+                        fix,
+                    });
                 }
                 _ => {}
             }
