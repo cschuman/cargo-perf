@@ -2,7 +2,7 @@
 name = "cargo-perf"
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.80"  # Required for LazyLock
+rust-version = "1.85"  # Required by transitive deps (clap_lex >=1.1) using edition2024
 description = "Preventive performance analysis for Rust - catch anti-patterns before production"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cschuman/cargo-perf"

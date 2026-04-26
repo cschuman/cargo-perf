@@ -81,15 +81,15 @@ jobs:
         run: cargo fmt --all -- --check
 
   msrv:
-    name: MSRV (1.80)
+    name: MSRV (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.80
+      - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.80"
+          toolchain: "1.85"
 
       - name: Build with MSRV
         run: cargo build --verbose
