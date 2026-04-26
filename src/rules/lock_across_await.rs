@@ -145,9 +145,7 @@ impl LockAcrossAwaitVisitor<'_> {
     /// Check for await points in an expression (but not the lock acquisition await)
     fn check_await_in_expr(&mut self, expr: &Expr, guards: &HashMap<String, usize>) {
         match expr {
-            Expr::Await(await_expr)
-                if Self::get_lock_method(&await_expr.base).is_none() =>
-            {
+            Expr::Await(await_expr) if Self::get_lock_method(&await_expr.base).is_none() => {
                 let guard_names: Vec<_> = guards.keys().cloned().collect();
                 let span = await_expr.await_token.span;
                 let line = span.start().line;
