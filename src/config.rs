@@ -152,6 +152,21 @@ impl Config {
         }
     }
 
+    /// Explicit severity override the user configured for a rule, if any.
+    ///
+    /// Returns `Some(Warning)` for `warn` and `Some(Error)` for `deny`. Returns
+    /// `None` when the rule is unset or set to `allow`, in which case each
+    /// diagnostic keeps the intrinsic severity the rule assigned (rules such as
+    /// `lock-across-await` emit different severities for different diagnostics).
+    /// `allow` disablement is handled separately via [`Config::rule_severity`].
+    pub fn severity_override(&self, rule_id: &str) -> Option<Severity> {
+        match self.rules.get(rule_id) {
+            Some(RuleSeverity::Warn) => Some(Severity::Warning),
+            Some(RuleSeverity::Deny) => Some(Severity::Error),
+            _ => None,
+        }
+    }
+
     /// Generate default TOML config
     pub fn default_toml() -> &'static str {
         r#"# cargo-perf configuration
@@ -279,6 +294,25 @@ test-rule = "warn"
         std::fs::write(tmp.path().join("cargo-perf.toml"), "invalid { toml").unwrap();
         let result = Config::load_or_default(tmp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_severity_override() {
+        let mut config = Config::default();
+        assert_eq!(config.severity_override("unset-rule"), None);
+        config
+            .rules
+            .insert("warn-rule".to_string(), RuleSeverity::Warn);
+        config
+            .rules
+            .insert("deny-rule".to_string(), RuleSeverity::Deny);
+        config
+            .rules
+            .insert("allow-rule".to_string(), RuleSeverity::Allow);
+        assert_eq!(config.severity_override("warn-rule"), Some(Severity::Warning));
+        assert_eq!(config.severity_override("deny-rule"), Some(Severity::Error));
+        // allow leaves intrinsic severity intact (disablement handled elsewhere)
+        assert_eq!(config.severity_override("allow-rule"), None);
     }
 
     #[test]
