@@ -97,12 +97,17 @@ cargo perf fix                      # Apply auto-fixes
 
 A linter you can't trust gets muted or uninstalled. cargo-perf measures its own
 **precision** and **recall** against a hand-labeled corpus and enforces a floor
-on both in CI — including negative cases that guard against the false positives
-other linters are infamous for (`Arc::clone` refcount bumps, `io::Read`/`Write`
-in loops, async guards dropped before `.await`).
+on both in CI — per rule, not just in aggregate. Every one of the 14 rules is
+scored by both a positive fixture (it must fire when it should) and a negative
+fixture (it must stay silent when it shouldn't), so the scorecard can't be
+gamed by a rule that never runs. The negatives directly guard the false
+positives other linters are infamous for: `Arc::clone`/`Rc::clone` refcount
+bumps, `Copy` values cloned in loops, `io::Read`/`Write` and `AtomicUsize::load`
+in loops, custom `.output()`/`.load()` methods mistaken for blocking/DB calls,
+and async guards dropped before `.await`.
 
 ```
-OVERALL   TP: 8   FP: 0   FN: 0   precision: 1.00   recall: 1.00   (15 fixtures)
+OVERALL   TP: 16   FP: 0   FN: 0   precision: 1.00   recall: 1.00   (39 fixtures, 14/14 rules)
 ```
 
 Reproduce with `cargo test --test accuracy -- --nocapture`. Full methodology,
