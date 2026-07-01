@@ -65,7 +65,7 @@ cargo perf fix                      # Apply auto-fixes
 | `unbounded-channel` | `mpsc::channel()`, `unbounded_channel()` | Memory exhaustion |
 | `unbounded-spawn` | `tokio::spawn` in loops | Resource exhaustion |
 | `regex-in-loop` | `Regex::new()` inside loops | 737x slower |
-| `clone-in-hot-loop` | `.clone()` on heap types in loops | 48x slower |
+| `clone-in-hot-loop` | `.clone()` in loops (excludes `Arc`/`Rc` refcount clones) | 48x slower |
 | `collect-then-iterate` | `.collect().iter()` | 2.3x slower |
 | `vec-no-capacity` | `Vec::new()` + push in loop | 1.8x slower |
 | `hashmap-no-capacity` | `HashMap::new()` + insert in loop | Repeated rehashing |

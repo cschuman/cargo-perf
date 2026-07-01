@@ -1,8 +1,9 @@
 use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
+use std::collections::HashSet;
 use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, ExprPath};
+use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ItemFn, Local, Pat, Type};
 
 /// Detects .clone() calls inside loops on heap-allocated types
 pub struct CloneInLoopRule;
@@ -17,7 +18,7 @@ impl Rule for CloneInLoopRule {
     }
 
     fn description(&self) -> &'static str {
-        "Detects .clone() calls on heap types inside loops"
+        "Detects .clone() calls inside loops (Arc/Rc reference-count clones are excluded)"
     }
 
     fn default_severity(&self) -> Severity {
@@ -29,6 +30,7 @@ impl Rule for CloneInLoopRule {
             ctx,
             diagnostics: Vec::new(),
             state: VisitorState::new(),
+            arc_rc_names: HashSet::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -39,9 +41,99 @@ struct CloneInLoopVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     state: VisitorState,
+    /// Names of bindings known to hold an `Arc`/`Rc` (function-scoped). Cloning
+    /// these only bumps a reference count, so it must not be flagged.
+    arc_rc_names: HashSet<String>,
+}
+
+/// True if a type is (a reference to) `Arc<..>` or `Rc<..>`.
+fn type_is_arc_rc(ty: &Type) -> bool {
+    match ty {
+        Type::Path(tp) => tp
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "Arc" || s.ident == "Rc"),
+        Type::Reference(r) => type_is_arc_rc(&r.elem),
+        Type::Paren(p) => type_is_arc_rc(&p.elem),
+        _ => false,
+    }
+}
+
+/// True if an expression is an `Arc`/`Rc` constructor call, e.g. `Arc::new(..)`,
+/// `Rc::clone(..)`, `std::sync::Arc::from(..)`.
+fn expr_is_arc_rc_ctor(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else { return false };
+    let Expr::Path(ExprPath { path, .. }) = &*call.func else {
+        return false;
+    };
+    let has_arc_rc = path
+        .segments
+        .iter()
+        .any(|s| s.ident == "Arc" || s.ident == "Rc");
+    let is_ctor = path.segments.last().is_some_and(|s| {
+        matches!(
+            s.ident.to_string().as_str(),
+            "new" | "clone" | "from" | "downgrade" | "default" | "new_cyclic"
+        )
+    });
+    has_arc_rc && is_ctor
+}
+
+/// The single-segment identifier of a `receiver` expression, if it is a bare name.
+fn simple_receiver_name(expr: &Expr) -> Option<String> {
+    if let Expr::Path(ExprPath {
+        path, qself: None, ..
+    }) = expr
+    {
+        if path.segments.len() == 1 {
+            return Some(path.segments[0].ident.to_string());
+        }
+    }
+    None
+}
+
+/// Extract the bound identifier from a `let` pattern (handles `let x` and `let x: T`).
+fn binding_name(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(id) => Some(id.ident.to_string()),
+        Pat::Type(pt) => binding_name(&pt.pat),
+        _ => None,
+    }
 }
 
 impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        if self.state.should_bail() {
+            return;
+        }
+        // Scope Arc/Rc bindings to this function so a name reused with a
+        // different type elsewhere is not wrongly suppressed.
+        let saved = std::mem::take(&mut self.arc_rc_names);
+        for input in &node.sig.inputs {
+            if let FnArg::Typed(pt) = input {
+                if type_is_arc_rc(&pt.ty) {
+                    if let Some(name) = binding_name(&pt.pat) {
+                        self.arc_rc_names.insert(name);
+                    }
+                }
+            }
+        }
+        syn::visit::visit_item_fn(self, node);
+        self.arc_rc_names = saved;
+    }
+
+    fn visit_local(&mut self, node: &'ast Local) {
+        if let Some(init) = &node.init {
+            if expr_is_arc_rc_ctor(&init.expr) {
+                if let Some(name) = binding_name(&node.pat) {
+                    self.arc_rc_names.insert(name);
+                }
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         if self.state.should_bail() {
             return;
@@ -80,24 +172,32 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if self.state.in_loop() && node.method == "clone" {
-            let span = node.method.span();
-            let line = span.start().line;
-            let column = span.start().column;
+            // Skip Arc/Rc reference-count clones (cheap and idiomatic).
+            let is_arc_rc_clone = simple_receiver_name(&node.receiver)
+                .is_some_and(|name| self.arc_rc_names.contains(&name));
 
-            self.diagnostics.push(Diagnostic {
-                rule_id: "clone-in-hot-loop",
-                severity: Severity::Warning,
-                message:
-                    "`.clone()` called inside loop; consider borrowing or moving the clone outside"
-                        .to_string(),
-                file_path: self.ctx.file_path.to_path_buf(),
-                line,
-                column,
-                end_line: None,
-                end_column: None,
-                suggestion: Some("Use a reference or move the clone outside the loop".to_string()),
-                fix: None,
-            });
+            if !is_arc_rc_clone {
+                let span = node.method.span();
+                let line = span.start().line;
+                let column = span.start().column;
+
+                self.diagnostics.push(Diagnostic {
+                    rule_id: "clone-in-hot-loop",
+                    severity: Severity::Warning,
+                    message:
+                        "`.clone()` called inside loop; consider borrowing or moving the clone outside"
+                            .to_string(),
+                    file_path: self.ctx.file_path.to_path_buf(),
+                    line,
+                    column,
+                    end_line: None,
+                    end_column: None,
+                    suggestion: Some(
+                        "Use a reference or move the clone outside the loop".to_string(),
+                    ),
+                    fix: None,
+                });
+            }
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -373,5 +473,102 @@ mod tests {
         "#;
         let diagnostics = check_clone_rule(source);
         assert!(diagnostics.is_empty());
+    }
+
+    // --- Arc/Rc reference-count clones must NOT be flagged (they are a cheap, correct idiom) ---
+
+    #[test]
+    fn test_no_flag_arc_param_clone() {
+        let source = r#"
+            use std::sync::Arc;
+            fn test(shared: Arc<Vec<u8>>) {
+                for _ in 0..10 {
+                    let _c = shared.clone(); // Arc refcount bump, not a deep clone
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert!(
+            diagnostics.is_empty(),
+            "Arc parameter clone in loop must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_no_flag_arc_new_binding_clone() {
+        let source = r#"
+            use std::sync::Arc;
+            fn test() {
+                let shared = Arc::new(vec![1u8, 2, 3]);
+                for _ in 0..10 {
+                    let _c = shared.clone();
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert!(
+            diagnostics.is_empty(),
+            "clone of an Arc::new binding must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_no_flag_rc_param_clone() {
+        let source = r#"
+            use std::rc::Rc;
+            fn test(shared: Rc<String>) {
+                for _ in 0..10 {
+                    let _c = shared.clone();
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert!(diagnostics.is_empty(), "Rc clone must not be flagged");
+    }
+
+    #[test]
+    fn test_no_flag_qualified_arc_clone() {
+        // Arc::clone(&x) is an idiomatic explicit refcount bump; it is a call, not a
+        // method receiver, so it must never be flagged.
+        let source = r#"
+            use std::sync::Arc;
+            fn test(shared: Arc<Vec<u8>>) {
+                for _ in 0..10 {
+                    let _c = Arc::clone(&shared);
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_string_clone_still_flagged_over_suppression_guard() {
+        // Guards against over-suppression: a real heap clone must still fire.
+        let source = r#"
+            fn test(s: &String) {
+                for _ in 0..10 {
+                    let _c = s.clone();
+                }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert_eq!(diagnostics.len(), 1, "String clone in loop must still be flagged");
+    }
+
+    #[test]
+    fn test_arc_binding_does_not_leak_across_functions() {
+        // `shared` is an Arc in f1 but a String in f2 -> f2's clone must still fire.
+        let source = r#"
+            use std::sync::Arc;
+            fn f1(shared: Arc<Vec<u8>>) {
+                for _ in 0..10 { let _c = shared.clone(); }
+            }
+            fn f2(shared: &String) {
+                for _ in 0..10 { let _c = shared.clone(); }
+            }
+        "#;
+        let diagnostics = check_clone_rule(source);
+        assert_eq!(diagnostics.len(), 1, "only f2's String clone should be flagged");
     }
 }
