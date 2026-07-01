@@ -9,7 +9,7 @@ use crate::engine::AnalysisContext;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Expr, ItemFn, Pat, Stmt};
+use syn::{Expr, ExprPath, ItemFn, Pat, Stmt};
 
 /// Detects lock guards held across await points
 pub struct LockAcrossAwaitRule;
@@ -87,9 +87,10 @@ impl LockAcrossAwaitVisitor<'_> {
 
     /// Analyze a block of statements for lock-across-await issues.
     ///
-    /// The `outer_guards` parameter contains guards from enclosing scopes that
-    /// are still active. Guards declared in this block are tracked separately
-    /// and automatically "dropped" when the block ends.
+    /// `outer_guards` holds guards from enclosing scopes that are still active.
+    /// A local `active` map is threaded through the block so that `drop(guard)`
+    /// releases a guard for the remainder of the block, and guards declared in a
+    /// nested block are scoped to that block.
     fn analyze_block(
         &mut self,
         stmts: &[Stmt],
@@ -100,117 +101,161 @@ impl LockAcrossAwaitVisitor<'_> {
             return;
         }
 
-        // Track guards declared in THIS block (separate from outer scope guards)
-        let mut block_guards: HashMap<String, usize> = HashMap::new();
+        let mut active: HashMap<String, usize> = outer_guards.clone();
 
         for stmt in stmts {
             match stmt {
                 Stmt::Local(local) => {
-                    // Check if this is a lock guard assignment
                     if let Some(init) = &local.init {
+                        // Awaits in the initializer happen while current guards are held.
+                        self.find_awaits(&init.expr, &active);
+                        if let Some((_, diverge)) = &init.diverge {
+                            self.find_awaits(diverge, &active);
+                        }
+                        // If this binds a lock guard, start tracking it.
                         if Self::get_lock_method(&init.expr).is_some() {
                             if let Some(var_name) = Self::extract_var_name(&local.pat) {
-                                let line = local.span().start().line;
-                                block_guards.insert(var_name, line);
+                                active.insert(var_name, local.span().start().line);
                             }
                         }
                     }
                 }
                 Stmt::Expr(expr, _) => {
-                    // Combine outer guards with block guards for checking
-                    let all_guards: HashMap<String, usize> = outer_guards
-                        .iter()
-                        .chain(block_guards.iter())
-                        .map(|(k, v)| (k.clone(), *v))
-                        .collect();
-
-                    // For nested blocks, recursively analyze (handles guard scoping correctly)
-                    // Don't use check_await_in_expr for blocks to avoid double-detection
+                    // `drop(guard)` / `std::mem::drop(guard)` releases the guard.
+                    if let Some(name) = Self::dropped_guard_name(expr) {
+                        active.remove(&name);
+                        continue;
+                    }
+                    // Nested plain block: recurse so inner guards are scoped correctly.
                     if let Expr::Block(block) = expr {
-                        self.analyze_block(&block.block.stmts, in_async, &all_guards);
-                    } else if !all_guards.is_empty() {
-                        // Check for await points in non-block expressions
-                        self.check_await_in_expr(expr, &all_guards);
+                        self.analyze_block(&block.block.stmts, in_async, &active);
+                    } else {
+                        self.find_awaits(expr, &active);
                     }
                 }
                 Stmt::Macro(_) => {
-                    // Macros can contain anything, skip for now
+                    // Macro bodies are opaque to us; skip (documented limitation).
                 }
                 _ => {}
             }
         }
-        // block_guards are implicitly dropped here when the block ends
     }
 
-    /// Check for await points in an expression (but not the lock acquisition await)
-    fn check_await_in_expr(&mut self, expr: &Expr, guards: &HashMap<String, usize>) {
-        match expr {
-            Expr::Await(await_expr) if Self::get_lock_method(&await_expr.base).is_none() => {
-                let guard_names: Vec<_> = guards.keys().cloned().collect();
-                let span = await_expr.await_token.span;
-                let line = span.start().line;
-                let column = span.start().column;
-
-                self.diagnostics.push(Diagnostic {
-                    rule_id: "lock-across-await",
-                    severity: Severity::Error,
-                    message: format!(
-                        "Lock guard{} `{}` held across `.await` point; this can cause deadlocks",
-                        if guard_names.len() > 1 { "s" } else { "" },
-                        guard_names.join("`, `")
-                    ),
-                    file_path: self.ctx.file_path.to_path_buf(),
-                    line,
-                    column,
-                    end_line: None,
-                    end_column: None,
-                    suggestion: Some(
-                        "Drop the guard before awaiting, or restructure to avoid holding locks across await points. \
-                        Consider using a scope block: `{ let guard = lock.lock(); /* use guard */ }` before the await."
-                            .to_string(),
-                    ),
-                    fix: None,
-                });
-            }
-            Expr::Block(block) => {
-                // Analyze nested block - guards from outer scope are still active
-                for stmt in &block.block.stmts {
-                    if let Stmt::Expr(e, _) = stmt {
-                        self.check_await_in_expr(e, guards);
-                    }
-                }
-            }
-            Expr::If(if_expr) => {
-                self.check_await_in_expr(&if_expr.cond, guards);
-                for stmt in &if_expr.then_branch.stmts {
-                    if let Stmt::Expr(e, _) = stmt {
-                        self.check_await_in_expr(e, guards);
-                    }
-                }
-                if let Some((_, else_branch)) = &if_expr.else_branch {
-                    self.check_await_in_expr(else_branch, guards);
-                }
-            }
-            Expr::Match(match_expr) => {
-                self.check_await_in_expr(&match_expr.expr, guards);
-                for arm in &match_expr.arms {
-                    self.check_await_in_expr(&arm.body, guards);
-                }
-            }
-            Expr::MethodCall(call) => {
-                self.check_await_in_expr(&call.receiver, guards);
-                for arg in &call.args {
-                    self.check_await_in_expr(arg, guards);
-                }
-            }
-            Expr::Call(call) => {
-                self.check_await_in_expr(&call.func, guards);
-                for arg in &call.args {
-                    self.check_await_in_expr(arg, guards);
-                }
-            }
-            _ => {}
+    /// Report every `.await` in `expr` (that is not itself a lock acquisition) as
+    /// holding the currently-active guards across an await point. Delegates to a
+    /// dedicated visitor so every expression form is covered (`?`, loops, `if`,
+    /// `match`, assignments, ...), but does not descend into nested async blocks
+    /// or closures, which are separate futures/scopes.
+    fn find_awaits(&mut self, expr: &Expr, guards: &HashMap<String, usize>) {
+        if guards.is_empty() {
+            return;
         }
+        let mut finder = AwaitFinder {
+            sites: Vec::new(),
+            depth: 0,
+        };
+        finder.visit_expr(expr);
+        for span in finder.sites {
+            self.push_lock_await_diagnostic(span, guards);
+        }
+    }
+
+    /// Detect `drop(x)` / `std::mem::drop(x)` / `mem::drop(x)` and return `x`.
+    fn dropped_guard_name(expr: &Expr) -> Option<String> {
+        let Expr::Call(call) = expr else { return None };
+        let Expr::Path(ExprPath { path, .. }) = &*call.func else {
+            return None;
+        };
+        if path.segments.last()?.ident != "drop" || call.args.len() != 1 {
+            return None;
+        }
+        if let Some(Expr::Path(ExprPath {
+            path: arg_path,
+            qself: None,
+            ..
+        })) = call.args.first()
+        {
+            if arg_path.segments.len() == 1 {
+                return Some(arg_path.segments[0].ident.to_string());
+            }
+        }
+        None
+    }
+
+    /// Emit a lock-across-await diagnostic for an await at `span`.
+    fn push_lock_await_diagnostic(
+        &mut self,
+        span: proc_macro2::Span,
+        guards: &HashMap<String, usize>,
+    ) {
+        let mut guard_names: Vec<_> = guards.keys().cloned().collect();
+        guard_names.sort();
+        let line = span.start().line;
+        let column = span.start().column;
+
+        self.diagnostics.push(Diagnostic {
+            rule_id: "lock-across-await",
+            severity: Severity::Error,
+            message: format!(
+                "Lock guard{} `{}` held across `.await` point; this can cause deadlocks",
+                if guard_names.len() > 1 { "s" } else { "" },
+                guard_names.join("`, `")
+            ),
+            file_path: self.ctx.file_path.to_path_buf(),
+            line,
+            column,
+            end_line: None,
+            end_column: None,
+            suggestion: Some(
+                "Drop the guard before awaiting, or restructure to avoid holding locks across await points. \
+                Consider using a scope block: `{ let guard = lock.lock(); /* use guard */ }` before the await."
+                    .to_string(),
+            ),
+            fix: None,
+        });
+    }
+}
+
+/// Maximum recursion depth for the await sub-visitor (defense against pathological input).
+const AWAIT_FINDER_MAX_DEPTH: usize = 256;
+
+/// Collects `.await` sites within an expression subtree while a lock guard is held,
+/// without descending into nested async blocks or closures.
+struct AwaitFinder {
+    sites: Vec<proc_macro2::Span>,
+    depth: usize,
+}
+
+impl<'ast> Visit<'ast> for AwaitFinder {
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        if self.depth >= AWAIT_FINDER_MAX_DEPTH {
+            return;
+        }
+        self.depth += 1;
+        syn::visit::visit_expr(self, node);
+        self.depth -= 1;
+    }
+
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        // The await that acquires a lock (e.g. `m.lock().await`) is not itself a
+        // held-across point.
+        if LockAcrossAwaitVisitor::get_lock_method(&node.base).is_none() {
+            self.sites.push(node.await_token.span);
+        }
+        // Continue into the base to catch further nested awaits.
+        self.visit_expr(&node.base);
+    }
+
+    fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {
+        // Separate future: its awaits do not hold the current guard.
+    }
+
+    fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {
+        // Separate scope: skip.
+    }
+
+    fn visit_item(&mut self, _node: &'ast syn::Item) {
+        // Nested item definitions have their own scope.
     }
 }
 
@@ -378,6 +423,122 @@ mod tests {
             diagnostics.len(),
             1,
             "Should warn when outer guard spans inner await"
+        );
+    }
+
+    // --- Detection-coverage fixes (H1/H6) and drop() false-positive fix ---
+
+    #[test]
+    fn test_detects_await_via_try_operator() {
+        // `other().await?` desugars to Try(Await(..)); the guard is held across it.
+        let source = r#"
+            async fn bad(m: &std::sync::Mutex<i32>) -> Result<(), ()> {
+                let g = m.lock().unwrap();
+                other().await?;
+                let _ = g;
+                Ok(())
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "guard held across `foo().await?` must be detected"
+        );
+    }
+
+    #[test]
+    fn test_detects_await_inside_for_loop_body() {
+        let source = r#"
+            async fn bad(m: &std::sync::Mutex<i32>) {
+                let g = m.lock().unwrap();
+                for _ in 0..10 {
+                    other().await; // guard held across await inside loop
+                }
+                let _ = g;
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(
+            !diagnostics.is_empty(),
+            "guard held across an await inside a loop body must be detected"
+        );
+    }
+
+    #[test]
+    fn test_detects_await_inside_while_loop_body() {
+        let source = r#"
+            async fn bad(m: &std::sync::Mutex<i32>) {
+                let g = m.lock().unwrap();
+                while cond() {
+                    other().await;
+                }
+                let _ = g;
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_detects_await_in_let_initializer() {
+        // `let v = fetch().await;` while a guard is held.
+        let source = r#"
+            async fn bad(m: &std::sync::Mutex<i32>) {
+                let g = m.lock().unwrap();
+                let _v = fetch().await;
+                let _ = g;
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_detection_when_guard_dropped_before_await() {
+        let source = r#"
+            async fn good(m: &std::sync::Mutex<i32>) {
+                let g = m.lock().unwrap();
+                let _v = *g;
+                drop(g);
+                other().await; // safe: guard already dropped
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(
+            diagnostics.is_empty(),
+            "dropping the guard before awaiting must suppress the diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_no_detection_when_guard_mem_dropped_before_await() {
+        let source = r#"
+            async fn good(m: &std::sync::Mutex<i32>) {
+                let g = m.lock().unwrap();
+                std::mem::drop(g);
+                other().await;
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_does_not_descend_into_spawned_async_block() {
+        // The await lives in a future spawned onto another task; the guard is not
+        // held across it, so this must NOT be flagged.
+        let source = r#"
+            async fn ok(m: &std::sync::Mutex<i32>) {
+                let g = m.lock().unwrap();
+                tokio::spawn(async move { other().await; });
+                let _ = g;
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(
+            diagnostics.is_empty(),
+            "await inside a spawned async block must not be attributed to the outer guard"
         );
     }
 }
