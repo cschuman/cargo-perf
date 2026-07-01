@@ -2,10 +2,11 @@
 
 mod context;
 pub mod file_analyzer;
-mod parser;
+pub mod parser;
 
 pub use context::{AnalysisContext, LineIndex};
 pub use file_analyzer::{analyze_file_with_rules, read_file_secure};
+pub use parser::{parse_file, ParseError};
 
 use crate::discovery::{discover_rust_files, DiscoveryOptions};
 use crate::error::{Error, Result};

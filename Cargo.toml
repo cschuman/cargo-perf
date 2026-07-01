@@ -8,6 +8,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/cschuman/cargo-perf"
 keywords = ["performance", "lint", "static-analysis", "cargo-plugin"]
 categories = ["development-tools", "development-tools::cargo-plugins"]
+# The fuzz harness is a separate nightly-only crate; keep it out of the
+# published package so `cargo publish --verify` never tries to build it.
+exclude = ["/fuzz"]
 
 [[bin]]
 name = "cargo-perf"

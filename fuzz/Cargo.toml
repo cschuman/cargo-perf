@@ -1,0 +1,40 @@
+# cargo-fuzz harness for cargo-perf.
+#
+# This is a SEPARATE, nightly-only crate. It is intentionally excluded from the
+# published `cargo-perf` package and from the main crate's stable CI. See
+# `fuzz/README.md` for how to run it.
+[package]
+name = "cargo-perf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.cargo-perf]
+path = ".."
+
+# Detach from any parent workspace so `cargo build` at the repo root never pulls
+# this nightly-only crate into a stable build.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "analyze"
+path = "fuzz_targets/analyze.rs"
+test = false
+doc = false
+bench = false
