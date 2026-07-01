@@ -880,7 +880,14 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if self.state.in_loop() {
             let method = node.method.to_string();
-            if method == "lock" || method == "try_lock" || method == "read" || method == "write" {
+            // `lock`/`try_lock` are unambiguous lock acquisitions. `read`/`write`
+            // (and their `try_` variants) are lock acquisitions ONLY when nullary:
+            // `RwLock::read()` takes no args, whereas `io::Read::read(buf)` /
+            // `io::Write::write(buf)` take a buffer argument and must not be flagged.
+            let is_lock_acquire = matches!(method.as_str(), "lock" | "try_lock")
+                || (matches!(method.as_str(), "read" | "try_read" | "write" | "try_write")
+                    && node.args.is_empty());
+            if is_lock_acquire {
                 let span = node.method.span();
                 let line = span.start().line;
                 let column = span.start().column;
@@ -1286,6 +1293,56 @@ mod tests {
         let diagnostics = check_mutex_loop(source);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("read"));
+    }
+
+    #[test]
+    fn test_rwlock_write_no_args_flagged() {
+        // RwLock::write() is nullary -> still a lock acquisition.
+        let source = r#"
+            fn test(data: &std::sync::RwLock<Vec<i32>>) {
+                for i in 0..10 {
+                    let mut guard = data.write().unwrap();
+                }
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_false_positive_io_write_in_loop() {
+        // io::Write::write(buf) takes an argument -> NOT a lock acquisition.
+        let source = r#"
+            use std::io::Write;
+            fn test(w: &mut Vec<u8>) {
+                for i in 0..10u8 {
+                    w.write(&[i]).unwrap();
+                }
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(
+            diagnostics.is_empty(),
+            "io::Write::write(buf) must not be flagged as lock contention"
+        );
+    }
+
+    #[test]
+    fn test_no_false_positive_io_read_in_loop() {
+        // io::Read::read(buf) takes an argument -> NOT a lock acquisition.
+        let source = r#"
+            use std::io::Read;
+            fn test<R: Read>(r: &mut R, buf: &mut [u8]) {
+                for _ in 0..10 {
+                    let _n = r.read(buf).unwrap();
+                }
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(
+            diagnostics.is_empty(),
+            "io::Read::read(buf) must not be flagged as lock contention"
+        );
     }
 
     // Test for false positive prevention - custom types with .new() should NOT be flagged
