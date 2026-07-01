@@ -33,9 +33,22 @@ cargo-perf catches all of these.
 
 ## Installation
 
+Prebuilt binary (fastest — no compile), via [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
+
+```bash
+cargo binstall cargo-perf
+```
+
+Or build from source:
+
 ```bash
 cargo install cargo-perf
 ```
+
+Either way the binary installs as `cargo-perf`, so it runs as a cargo subcommand: `cargo perf`.
+
+**Adopting on an existing codebase?** Don't let pre-existing findings block you — see
+[Getting Started](docs/getting-started.md) for the baseline-and-ratchet workflow that fails CI only on *new* issues.
 
 ## Usage
 

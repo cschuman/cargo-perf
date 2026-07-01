@@ -12,6 +12,19 @@ categories = ["development-tools", "development-tools::cargo-plugins"]
 # published package so `cargo publish --verify` never tries to build it.
 exclude = ["/fuzz"]
 
+# `cargo binstall cargo-perf` fetches the prebuilt binary from GitHub Releases
+# instead of compiling from source. The templates below match the asset names
+# produced by .github/workflows/release.yml, which uploads a flat archive
+# (`cargo-perf-<target>.tar.gz`, or `.zip` on Windows) containing just the
+# `cargo-perf` binary, under a `v<version>` tag.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/cargo-perf-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "cargo-perf"
 path = "src/main.rs"
