@@ -553,7 +553,11 @@ mod tests {
             }
         "#;
         let diagnostics = check_clone_rule(source);
-        assert_eq!(diagnostics.len(), 1, "String clone in loop must still be flagged");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "String clone in loop must still be flagged"
+        );
     }
 
     #[test]
@@ -569,6 +573,10 @@ mod tests {
             }
         "#;
         let diagnostics = check_clone_rule(source);
-        assert_eq!(diagnostics.len(), 1, "only f2's String clone should be flagged");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "only f2's String clone should be flagged"
+        );
     }
 }

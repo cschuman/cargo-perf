@@ -309,7 +309,10 @@ test-rule = "warn"
         config
             .rules
             .insert("allow-rule".to_string(), RuleSeverity::Allow);
-        assert_eq!(config.severity_override("warn-rule"), Some(Severity::Warning));
+        assert_eq!(
+            config.severity_override("warn-rule"),
+            Some(Severity::Warning)
+        );
         assert_eq!(config.severity_override("deny-rule"), Some(Severity::Error));
         // allow leaves intrinsic severity intact (disablement handled elsewhere)
         assert_eq!(config.severity_override("allow-rule"), None);

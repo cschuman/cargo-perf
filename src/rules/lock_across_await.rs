@@ -7,7 +7,6 @@ use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
 use std::collections::HashMap;
-use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Expr, ExprPath, ItemFn, Pat, Stmt};
 
@@ -85,6 +84,22 @@ impl LockAcrossAwaitVisitor<'_> {
         }
     }
 
+    /// Whether a lock acquisition is asynchronous (acquired via `.await`, as with
+    /// `tokio::sync::Mutex`). Async guards held across `.await` merely serialize
+    /// tasks; synchronous guards (std/parking_lot) risk deadlocking the runtime.
+    fn is_async_lock_acquisition(expr: &Expr) -> bool {
+        match expr {
+            Expr::Await(_) => true,
+            Expr::MethodCall(call)
+                if matches!(call.method.to_string().as_str(), "unwrap" | "expect" | "ok") =>
+            {
+                Self::is_async_lock_acquisition(&call.receiver)
+            }
+            Expr::Try(try_expr) => Self::is_async_lock_acquisition(&try_expr.expr),
+            _ => false,
+        }
+    }
+
     /// Analyze a block of statements for lock-across-await issues.
     ///
     /// `outer_guards` holds guards from enclosing scopes that are still active.
@@ -95,13 +110,14 @@ impl LockAcrossAwaitVisitor<'_> {
         &mut self,
         stmts: &[Stmt],
         in_async: bool,
-        outer_guards: &HashMap<String, usize>,
+        outer_guards: &HashMap<String, bool>,
     ) {
         if !in_async {
             return;
         }
 
-        let mut active: HashMap<String, usize> = outer_guards.clone();
+        // Maps guard name -> is_async (acquired via `.await`, e.g. a tokio lock).
+        let mut active: HashMap<String, bool> = outer_guards.clone();
 
         for stmt in stmts {
             match stmt {
@@ -112,10 +128,12 @@ impl LockAcrossAwaitVisitor<'_> {
                         if let Some((_, diverge)) = &init.diverge {
                             self.find_awaits(diverge, &active);
                         }
-                        // If this binds a lock guard, start tracking it.
+                        // If this binds a lock guard, start tracking it (recording
+                        // whether it is an async lock acquired via `.await`).
                         if Self::get_lock_method(&init.expr).is_some() {
                             if let Some(var_name) = Self::extract_var_name(&local.pat) {
-                                active.insert(var_name, local.span().start().line);
+                                let is_async = Self::is_async_lock_acquisition(&init.expr);
+                                active.insert(var_name, is_async);
                             }
                         }
                     }
@@ -146,7 +164,7 @@ impl LockAcrossAwaitVisitor<'_> {
     /// dedicated visitor so every expression form is covered (`?`, loops, `if`,
     /// `match`, assignments, ...), but does not descend into nested async blocks
     /// or closures, which are separate futures/scopes.
-    fn find_awaits(&mut self, expr: &Expr, guards: &HashMap<String, usize>) {
+    fn find_awaits(&mut self, expr: &Expr, guards: &HashMap<String, bool>) {
         if guards.is_empty() {
             return;
         }
@@ -183,34 +201,61 @@ impl LockAcrossAwaitVisitor<'_> {
     }
 
     /// Emit a lock-across-await diagnostic for an await at `span`.
+    ///
+    /// A synchronous guard (std/parking_lot) held across `.await` can deadlock the
+    /// runtime and is reported as an `Error`. If every held guard is asynchronous
+    /// (e.g. `tokio::sync::Mutex`), it is correct-by-design but serializes tasks,
+    /// so it is reported as a `Warning`.
     fn push_lock_await_diagnostic(
         &mut self,
         span: proc_macro2::Span,
-        guards: &HashMap<String, usize>,
+        guards: &HashMap<String, bool>,
     ) {
         let mut guard_names: Vec<_> = guards.keys().cloned().collect();
         guard_names.sort();
+        let plural = if guard_names.len() > 1 { "s" } else { "" };
+        let names = guard_names.join("`, `");
         let line = span.start().line;
         let column = span.start().column;
 
+        // Any synchronous guard among those held makes this a deadlock risk.
+        let has_sync_guard = guards.values().any(|&is_async| !is_async);
+
+        let (severity, message, suggestion) = if has_sync_guard {
+            (
+                Severity::Error,
+                format!(
+                    "Synchronous lock guard{plural} `{names}` held across `.await` point; \
+                    this can deadlock the async runtime"
+                ),
+                "Drop the guard before awaiting, or narrow its scope: \
+                `{ let guard = lock.lock(); /* use guard */ }` before the await. \
+                If you must hold a lock across await, use an async lock (tokio::sync::Mutex)."
+                    .to_string(),
+            )
+        } else {
+            (
+                Severity::Warning,
+                format!(
+                    "Async lock guard{plural} `{names}` held across `.await` point; \
+                    this is safe but serializes tasks and can throttle throughput in hot paths"
+                ),
+                "This is safe with an async lock. If contention matters, drop the guard \
+                before awaiting or shorten the critical section."
+                    .to_string(),
+            )
+        };
+
         self.diagnostics.push(Diagnostic {
             rule_id: "lock-across-await",
-            severity: Severity::Error,
-            message: format!(
-                "Lock guard{} `{}` held across `.await` point; this can cause deadlocks",
-                if guard_names.len() > 1 { "s" } else { "" },
-                guard_names.join("`, `")
-            ),
+            severity,
+            message,
             file_path: self.ctx.file_path.to_path_buf(),
             line,
             column,
             end_line: None,
             end_column: None,
-            suggestion: Some(
-                "Drop the guard before awaiting, or restructure to avoid holding locks across await points. \
-                Consider using a scope block: `{ let guard = lock.lock(); /* use guard */ }` before the await."
-                    .to_string(),
-            ),
+            suggestion: Some(suggestion),
             fix: None,
         });
     }
@@ -302,7 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn test_detects_mutex_lock_across_await() {
+    fn test_tokio_mutex_across_await_is_warning_not_deadlock() {
+        // Holding a tokio (async) Mutex guard across .await is CORRECT by design
+        // (that is the whole point of an async mutex). It is not a deadlock; at most
+        // it serializes tasks. Report it as a Warning, not an Error, and do not call
+        // it a deadlock. This is the opposite of clippy::await_holding_lock.
         let source = r#"
             async fn bad(mutex: &tokio::sync::Mutex<i32>) {
                 let guard = mutex.lock().await;
@@ -311,12 +360,21 @@ mod tests {
         "#;
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("guard"));
-        assert!(diagnostics[0].message.contains("deadlock"));
+        assert_eq!(
+            diagnostics[0].severity,
+            Severity::Warning,
+            "tokio async guard across await is a Warning, not an Error"
+        );
+        assert!(
+            !diagnostics[0].message.contains("deadlock"),
+            "must not describe an async lock as a deadlock"
+        );
     }
 
     #[test]
-    fn test_detects_std_mutex_lock_across_await() {
+    fn test_std_mutex_lock_across_await_is_error_deadlock() {
+        // A std::sync::Mutex guard is a synchronous lock; holding it across .await
+        // can deadlock the runtime. This stays an Error.
         let source = r#"
             async fn bad(mutex: &std::sync::Mutex<i32>) {
                 let guard = mutex.lock().unwrap();
@@ -325,6 +383,23 @@ mod tests {
         "#;
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert!(diagnostics[0].message.contains("deadlock"));
+    }
+
+    #[test]
+    fn test_mixed_sync_and_async_guard_is_error() {
+        // If a synchronous guard is among those held, the await is an Error.
+        let source = r#"
+            async fn bad(a: &std::sync::Mutex<i32>, b: &tokio::sync::Mutex<i32>) {
+                let ga = a.lock().unwrap();
+                let gb = b.lock().await;
+                some_async_fn().await;
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
     }
 
     #[test]

@@ -17,10 +17,10 @@ async fn read_config() -> Config {
     toml::from_str(&data).unwrap()
 }
 
-// Deadlock — holds lock across yield point
-async fn update(mutex: &tokio::sync::Mutex<Data>) {
-    let guard = mutex.lock().await;
-    some_async_op().await; // guard still held across await
+// Deadlock risk — a *synchronous* guard held across an await point
+async fn update(mutex: &std::sync::Mutex<Data>) {
+    let guard = mutex.lock().unwrap();
+    some_async_op().await; // sync guard held across .await can deadlock the runtime
 }
 
 // 737x slower — regex compilation in hot loop
@@ -55,8 +55,14 @@ cargo perf fix                      # Apply auto-fixes
 | Rule | What it catches |
 |------|-----------------|
 | `async-block-in-async` | `std::fs`, `thread::sleep`, blocking I/O in async functions |
-| `lock-across-await` | MutexGuard/RwLockGuard held across `.await` (deadlock risk) |
+| `lock-across-await` | **Synchronous** `MutexGuard`/`RwLockGuard` (std/parking_lot) held across `.await` — deadlock risk |
 | `n-plus-one-query` | Database queries inside loops (SQLx, Diesel, SeaORM) |
+
+> **Note on `lock-across-await`:** An *async* lock guard (`tokio::sync::Mutex`, `RwLock`) held across `.await` is
+> correct by design — that is what async locks are for. cargo-perf reports that case as a **Warning** (it serializes
+> tasks and can throttle throughput), not an error. Only *synchronous* guards held across `.await` are flagged as
+> errors, because those can deadlock the runtime. This is deliberately narrower than `clippy::await_holding_lock`,
+> which warns on every guard regardless of lock type.
 
 ### Warnings (Medium Confidence)
 
@@ -148,7 +154,7 @@ Real measurements (Apple M1 Pro, 1000 iterations):
 | `clone()` in loop | **48x slower** |
 | `collect().iter()` | **2.3x slower** |
 | Blocking in async | Blocks runtime thread |
-| Lock across await | **Deadlock** |
+| Sync lock across await | **Deadlock** |
 
 See [benchmarks/](benchmarks/) for methodology.
 

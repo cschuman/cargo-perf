@@ -13,7 +13,7 @@ Static analysis tool that identifies Rust-specific performance anti-patterns at 
 | Async-aware analysis | No | Yes |
 | N+1 query detection | No | Yes |
 | ORM integration | No | Yes (Diesel, SQLx, SeaORM) |
-| Data flow (lock-across-await) | No | Yes |
+| Lock-across-await severity | `await_holding_lock` warns on every guard | Sync guard = deadlock **error**, async guard = throughput **warning** |
 | Auto-fix generation | Some | Comprehensive |
 | CI/CD first | Afterthought | Native |
 | SARIF output | No | Yes |
@@ -28,7 +28,7 @@ Static analysis tool that identifies Rust-specific performance anti-patterns at 
 | ID | Pattern | Severity |
 |----|---------|----------|
 | `async-block-in-async` | Blocking calls inside `async fn` | Error |
-| `lock-across-await` | MutexGuard held across `.await` | Error |
+| `lock-across-await` | Sync guard held across `.await` (deadlock) / async guard (throughput) | Error / Warning |
 | `n-plus-one-query` | Database query inside loop body | Error |
 | `unbounded-channel` | Unbounded channel without backpressure | Warning |
 | `clone-in-hot-loop` | `.clone()` on heap types in loops | Warning |
