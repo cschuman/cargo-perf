@@ -59,7 +59,12 @@ impl Rule for NPlusOneQueryRule {
             state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
-        visitor.diagnostics
+        // A single query statement (e.g. `query(..).bind(..).fetch_one(..)`) can
+        // match more than one detector on the same line; collapse to one finding.
+        let mut diagnostics = visitor.diagnostics;
+        diagnostics.sort_by_key(|d| (d.line, d.column));
+        diagnostics.dedup_by_key(|d| d.line);
+        diagnostics
     }
 }
 
@@ -107,6 +112,22 @@ const SEAORM_AMBIGUOUS_METHODS: &[&str] = &["one", "all", "find"];
 
 /// Entity operations that need receiver validation
 const AMBIGUOUS_OPERATIONS: &[&str] = &["insert", "update", "delete", "save", "execute"];
+
+/// Method names distinctive enough to an ORM that an ORM import in the file is
+/// sufficient corroboration. Deliberately excludes ubiquitous names like `load`
+/// (atomics), `first`/`find`/`one`/`all` (iterators), and `insert` (collections).
+const ORM_SPECIFIC_METHODS: &[&str] = &[
+    "fetch_one",
+    "fetch_all",
+    "fetch_optional",
+    "fetch_many",
+    "get_result",
+    "get_results",
+    "find_by_id",
+    "find_related",
+    "find_with_related",
+    "find_also_related",
+];
 
 /// Maximum recursion depth for looks_like_db_operation to prevent stack overflow
 const MAX_DB_CHECK_DEPTH: usize = 64;
@@ -184,72 +205,57 @@ impl NPlusOneVisitor<'_> {
         receiver: &Expr,
         args: &Punctuated<Expr, Token![,]>,
     ) {
-        // Check unambiguous methods first - always flag these (no false positives)
+        // Every N+1 detection requires corroboration that this really is a
+        // database call. A bare method name is far too ambiguous: `load` is an
+        // atomic read, `first`/`find`/`one`/`all` are iterator methods, `insert`
+        // is a HashMap method. We corroborate via:
+        //   * a receiver that looks like a query-builder chain, or
+        //   * a database connection / pool passed as an argument, or
+        //   * for rare ORM-specific method names, an ORM import in the file.
+        let strong =
+            Self::looks_like_db_operation(receiver, 0) || Self::has_db_connection_arg(args);
+        let corroborated =
+            strong || (ORM_SPECIFIC_METHODS.contains(&method_name) && self.orm_imported());
+        if !corroborated {
+            return;
+        }
+
         if SQLX_FETCH_METHODS.contains(&method_name) {
             self.report_diagnostic(
                 span,
                 "Consider using WHERE ... IN or ANY() for batch fetching.",
                 method_name,
             );
-            return;
-        }
-
-        if DIESEL_UNAMBIGUOUS_METHODS.contains(&method_name) {
+        } else if DIESEL_UNAMBIGUOUS_METHODS.contains(&method_name)
+            || DIESEL_AMBIGUOUS_METHODS.contains(&method_name)
+        {
             self.report_diagnostic(
                 span,
                 "Consider using .filter(column.eq_any(&ids)) for batch operations.",
                 method_name,
             );
-            return;
-        }
-
-        if SEAORM_UNAMBIGUOUS_METHODS.contains(&method_name) {
+        } else if SEAORM_UNAMBIGUOUS_METHODS.contains(&method_name)
+            || SEAORM_AMBIGUOUS_METHODS.contains(&method_name)
+        {
             self.report_diagnostic(
                 span,
                 "Consider using Entity::find().filter(Column::Id.is_in(ids)) for batch fetching.",
                 method_name,
             );
-            return;
-        }
-
-        // For ambiguous methods, require validation to prevent false positives
-        // (e.g., Vec::first(), HashMap::insert(), Iterator::find())
-        // We check the receiver OR if args look like DB connection
-        let receiver_looks_like_db = Self::looks_like_db_operation(receiver, 0);
-        let args_look_like_db = Self::has_db_connection_arg(args);
-
-        if !receiver_looks_like_db && !args_look_like_db {
-            return;
-        }
-
-        // Check ambiguous Diesel methods
-        if DIESEL_AMBIGUOUS_METHODS.contains(&method_name) {
-            self.report_diagnostic(
-                span,
-                "Consider using .filter(column.eq_any(&ids)) for batch operations.",
-                method_name,
-            );
-            return;
-        }
-
-        // Check ambiguous SeaORM methods
-        if SEAORM_AMBIGUOUS_METHODS.contains(&method_name) {
-            self.report_diagnostic(
-                span,
-                "Consider using Entity::find().filter(Column::Id.is_in(ids)) for batch fetching.",
-                method_name,
-            );
-            return;
-        }
-
-        // Check ambiguous operations (insert, update, delete, save)
-        if AMBIGUOUS_OPERATIONS.contains(&method_name) {
+        } else if AMBIGUOUS_OPERATIONS.contains(&method_name) {
             self.report_diagnostic(
                 span,
                 "Consider using Entity::insert_many() or batch operations.",
                 method_name,
             );
         }
+    }
+
+    /// Whether the file imports a known ORM crate. Used only as a weak
+    /// corroboration signal for rare, ORM-specific method names.
+    fn orm_imported(&self) -> bool {
+        let src = self.ctx.source;
+        src.contains("use diesel") || src.contains("use sqlx") || src.contains("use sea_orm")
     }
 
     /// Check if any argument looks like a database connection.
@@ -272,10 +278,7 @@ impl NPlusOneVisitor<'_> {
             if let Expr::Path(path) = arg {
                 if let Some(ident) = path.path.get_ident() {
                     let name = ident.to_string().to_lowercase();
-                    if DB_CONNECTION_NAMES
-                        .iter()
-                        .any(|&db_name| name.contains(db_name))
-                    {
+                    if DB_CONNECTION_NAMES.iter().any(|&db_name| name == db_name) {
                         return true;
                     }
                 }
@@ -547,6 +550,62 @@ mod tests {
         let diagnostics = check_code(source);
         assert!(!diagnostics.is_empty());
         assert!(diagnostics.iter().any(|d| d.message.contains("fetch_one")));
+    }
+
+    // ------------------------------------------------------------------
+    // Corroboration gating (false-positive guards)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_atomic_load_in_loop_is_not_n_plus_one() {
+        let source = r#"
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            fn count(c: &AtomicUsize) -> usize {
+                let mut n = 0;
+                for _ in 0..10 { n += c.load(Ordering::Relaxed); }
+                n
+            }
+        "#;
+        assert!(check_code(source).is_empty(), "atomic load flagged as N+1");
+    }
+
+    #[test]
+    fn test_custom_load_without_connection_is_silent() {
+        let source = r#"
+            struct Cache;
+            impl Cache { fn load(&self, _k: u32) -> u32 { 0 } }
+            fn warm(cache: &Cache) {
+                for k in 0..5 { let _ = cache.load(k); }
+            }
+        "#;
+        assert!(check_code(source).is_empty(), "custom load flagged as N+1");
+    }
+
+    #[test]
+    fn test_diesel_load_with_connection_arg_still_flags() {
+        // A `.load(&mut conn)` connection argument corroborates the DB call.
+        let source = r#"
+            fn bad(conn: &mut PgConnection, ids: Vec<i32>) {
+                for id in ids {
+                    let _ = users::table.filter(users::id.eq(id)).load::<User>(conn);
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(diagnostics.iter().any(|d| d.message.contains("load")));
+    }
+
+    #[test]
+    fn test_context_variable_does_not_corroborate() {
+        // `context` must not match the `tx` connection name via substring.
+        let source = r#"
+            struct Renderer;
+            impl Renderer { fn first(&self) -> u32 { 0 } }
+            fn draw(context: u32, r: &Renderer) {
+                for _ in 0..3 { let _ = r.first(); let _ = context; }
+            }
+        "#;
+        assert!(check_code(source).is_empty(), "context matched tx substring");
     }
 
     #[test]
