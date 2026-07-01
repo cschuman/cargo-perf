@@ -137,3 +137,22 @@ jobs:
 
       - name: Run security audit
         run: cargo audit
+
+  # Aggregate gate: this is the single required status check in branch protection.
+  # It passes only when every other job passes, so the required-check name stays
+  # stable ("CI") even when the test matrix changes. Without this, branch
+  # protection required a context named "CI" that no job ever produced, so every
+  # PR was permanently BLOCKED despite green checks.
+  ci:
+    name: CI
+    needs: [test, clippy, fmt, msrv, doc, dogfood, security]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job did not succeed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "One or more required CI jobs failed, were cancelled, or were skipped."
+          exit 1
+      - name: All checks passed
+        run: echo "All CI jobs succeeded."

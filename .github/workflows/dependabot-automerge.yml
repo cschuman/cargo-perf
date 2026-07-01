@@ -1,0 +1,28 @@
+name: Dependabot auto-merge
+
+# Automatically merges Dependabot PRs once the required "CI" status check passes.
+# Scope: ALL update types, including majors — CI (build/test/clippy/msrv/audit) is
+# the safety net. Tighten by gating on dependabot/fetch-metadata update-type if that
+# ever feels too loose.
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      # NOTE: we deliberately do NOT check out or run the PR's code here. This job
+      # only calls the GitHub API, so pull_request_target is safe (no untrusted
+      # code executes with the write-scoped token).
+      - name: Enable auto-merge
+        # --auto queues the merge; GitHub completes it only after the required
+        # branch-protection checks (the CI gate) succeed.
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
