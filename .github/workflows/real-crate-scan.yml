@@ -1,0 +1,30 @@
+name: Real-crate scan
+
+# Robustness signal against real, published crates. Kept OUT of the per-PR `CI`
+# gate on purpose: it shallow-clones external repositories, so it must not be
+# able to block a PR on a network hiccup. It runs on a schedule and on demand,
+# and asserts cargo-perf never crashes on real-world code.
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  scan:
+    name: Scan real crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Scan real crates (fast subset)
+        run: ./scripts/real-crate-scan.sh --fast

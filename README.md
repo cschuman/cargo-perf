@@ -93,6 +93,21 @@ cargo perf fix                      # Apply auto-fixes
 | `string-concat-loop` | String `+` in loops | Use `push_str()` |
 | `mutex-in-loop` | Lock acquired inside loop | Acquire once outside |
 
+## Accuracy
+
+A linter you can't trust gets muted or uninstalled. cargo-perf measures its own
+**precision** and **recall** against a hand-labeled corpus and enforces a floor
+on both in CI — including negative cases that guard against the false positives
+other linters are infamous for (`Arc::clone` refcount bumps, `io::Read`/`Write`
+in loops, async guards dropped before `.await`).
+
+```
+OVERALL   TP: 8   FP: 0   FN: 0   precision: 1.00   recall: 1.00   (15 fixtures)
+```
+
+Reproduce with `cargo test --test accuracy -- --nocapture`. Full methodology,
+plus the fuzzing and real-crate robustness scans, in [docs/accuracy.md](docs/accuracy.md).
+
 ## CI Integration
 
 ### GitHub Action
