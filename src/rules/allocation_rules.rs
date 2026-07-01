@@ -3,9 +3,10 @@
 use super::visitor::VisitorState;
 use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
+use std::collections::HashSet;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, ExprPath};
+use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ItemFn, Local, Pat, Type};
 
 /// Detects Vec::new() followed by push in a loop without using with_capacity
 pub struct VecNoCapacityRule;
@@ -828,6 +829,7 @@ impl Rule for MutexLockInLoopRule {
             ctx,
             diagnostics: Vec::new(),
             state: VisitorState::new(),
+            lock_names: HashSet::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -838,9 +840,114 @@ struct MutexLockVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     state: VisitorState,
+    /// Names of bindings known to hold a `Mutex`/`RwLock` (function-scoped).
+    /// Ambiguous `.read()`/`.write()`/`.lock()` only count as lock contention on
+    /// one of these; on any other receiver they are ordinary domain methods.
+    lock_names: HashSet<String>,
+}
+
+/// True if a type mentions `Mutex` or `RwLock` anywhere (through references and
+/// generic wrappers like `Arc<Mutex<T>>`).
+fn type_mentions_lock(ty: &Type) -> bool {
+    match ty {
+        Type::Path(tp) => tp.path.segments.iter().any(|s| {
+            let n = s.ident.to_string();
+            n == "Mutex"
+                || n == "RwLock"
+                || matches!(&s.arguments, syn::PathArguments::AngleBracketed(a)
+                    if a.args.iter().any(|arg| matches!(arg, syn::GenericArgument::Type(t) if type_mentions_lock(t))))
+        }),
+        Type::Reference(r) => type_mentions_lock(&r.elem),
+        Type::Paren(p) => type_mentions_lock(&p.elem),
+        _ => false,
+    }
+}
+
+/// True if an expression constructs a lock, e.g. `Mutex::new(..)`,
+/// `RwLock::new(..)`, or a wrapped `Arc::new(Mutex::new(..))`.
+fn expr_is_lock_ctor(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    let Expr::Path(ExprPath { path, .. }) = &*call.func else {
+        return false;
+    };
+    let mentions_lock = path
+        .segments
+        .iter()
+        .any(|s| s.ident == "Mutex" || s.ident == "RwLock");
+    let last_is_ctor = path
+        .segments
+        .last()
+        .is_some_and(|s| matches!(s.ident.to_string().as_str(), "new" | "from" | "default"));
+    if mentions_lock && last_is_ctor {
+        return true;
+    }
+    // `Arc::new(Mutex::new(..))` / `Rc::new(RwLock::new(..))`
+    let is_wrapper = path.segments.iter().any(|s| s.ident == "Arc" || s.ident == "Rc")
+        && path.segments.last().is_some_and(|s| s.ident == "new");
+    if is_wrapper {
+        if let Some(first) = call.args.first() {
+            return expr_is_lock_ctor(first);
+        }
+    }
+    false
+}
+
+/// The single-segment identifier of a receiver expression, if it is a bare name.
+fn mutex_simple_receiver_name(expr: &Expr) -> Option<String> {
+    if let Expr::Path(ExprPath {
+        path, qself: None, ..
+    }) = expr
+    {
+        if path.segments.len() == 1 {
+            return Some(path.segments[0].ident.to_string());
+        }
+    }
+    None
+}
+
+/// The bound identifier of a `let` pattern (`let x` / `let x: T`).
+fn mutex_binding_name(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(id) => Some(id.ident.to_string()),
+        Pat::Type(pt) => mutex_binding_name(&pt.pat),
+        _ => None,
+    }
 }
 
 impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        if self.state.should_bail() {
+            return;
+        }
+        // Scope lock bindings to this function so a name reused elsewhere with a
+        // non-lock type is not wrongly flagged.
+        let saved = std::mem::take(&mut self.lock_names);
+        for input in &node.sig.inputs {
+            if let FnArg::Typed(pt) = input {
+                if type_mentions_lock(&pt.ty) {
+                    if let Some(name) = mutex_binding_name(&pt.pat) {
+                        self.lock_names.insert(name);
+                    }
+                }
+            }
+        }
+        syn::visit::visit_item_fn(self, node);
+        self.lock_names = saved;
+    }
+
+    fn visit_local(&mut self, node: &'ast Local) {
+        if let Some(init) = &node.init {
+            if expr_is_lock_ctor(&init.expr) {
+                if let Some(name) = mutex_binding_name(&node.pat) {
+                    self.lock_names.insert(name);
+                }
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         if self.state.should_bail() {
             return;
@@ -887,7 +994,12 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
             let is_lock_acquire = matches!(method.as_str(), "lock" | "try_lock")
                 || (matches!(method.as_str(), "read" | "try_read" | "write" | "try_write")
                     && node.args.is_empty());
-            if is_lock_acquire {
+            // Only flag when the receiver is a binding known to hold a lock; a
+            // bare `.read()`/`.write()`/`.lock()` on any other value is an
+            // ordinary domain method, not lock contention.
+            let receiver_is_lock = mutex_simple_receiver_name(&node.receiver)
+                .is_some_and(|name| self.lock_names.contains(&name));
+            if is_lock_acquire && receiver_is_lock {
                 let span = node.method.span();
                 let line = span.start().line;
                 let column = span.start().column;
@@ -1252,6 +1364,38 @@ mod tests {
     }
 
     // Mutex tests
+    #[test]
+    fn test_custom_nullary_read_not_flagged() {
+        // A nullary `.read()` on a non-lock type is a domain method, not a lock.
+        let source = r#"
+            struct Sensor;
+            impl Sensor { fn read(&self) -> u32 { 0 } }
+            fn poll(sensor: &Sensor) {
+                for _ in 0..10 { let _ = sensor.read(); }
+            }
+        "#;
+        assert!(
+            check_mutex_loop(source).is_empty(),
+            "custom nullary read() must not be flagged as lock contention"
+        );
+    }
+
+    #[test]
+    fn test_lock_from_local_ctor_binding_flagged() {
+        // A lock created via a local `Mutex::new(..)` binding is tracked.
+        let source = r#"
+            fn run() {
+                let m = std::sync::Mutex::new(0);
+                for _ in 0..10 { let _g = m.lock().unwrap(); }
+            }
+        "#;
+        assert_eq!(
+            check_mutex_loop(source).len(),
+            1,
+            "lock() on a tracked Mutex::new binding must be flagged"
+        );
+    }
+
     #[test]
     fn test_mutex_lock_in_loop() {
         let source = r#"

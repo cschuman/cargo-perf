@@ -31,6 +31,7 @@ impl Rule for CloneInLoopRule {
             diagnostics: Vec::new(),
             state: VisitorState::new(),
             arc_rc_names: HashSet::new(),
+            copy_names: HashSet::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -44,6 +45,30 @@ struct CloneInLoopVisitor<'a> {
     /// Names of bindings known to hold an `Arc`/`Rc` (function-scoped). Cloning
     /// these only bumps a reference count, so it must not be flagged.
     arc_rc_names: HashSet<String>,
+    /// Names of bindings known to hold a `Copy` primitive (function-scoped).
+    /// Cloning these is a no-op copy, already covered by clippy::clone_on_copy.
+    copy_names: HashSet<String>,
+}
+
+/// Known `Copy` primitive type names. Cloning a value of one of these is a
+/// trivial bitwise copy, not a heap allocation.
+const COPY_PRIMITIVES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32",
+    "f64", "bool", "char",
+];
+
+/// True if a type is (a reference to) a known `Copy` primitive.
+fn type_is_copy_primitive(ty: &Type) -> bool {
+    match ty {
+        Type::Path(tp) => tp
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| COPY_PRIMITIVES.contains(&s.ident.to_string().as_str())),
+        Type::Reference(r) => type_is_copy_primitive(&r.elem),
+        Type::Paren(p) => type_is_copy_primitive(&p.elem),
+        _ => false,
+    }
 }
 
 /// True if a type is (a reference to) `Arc<..>` or `Rc<..>`.
@@ -107,26 +132,37 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
         if self.state.should_bail() {
             return;
         }
-        // Scope Arc/Rc bindings to this function so a name reused with a
+        // Scope Arc/Rc and Copy bindings to this function so a name reused with a
         // different type elsewhere is not wrongly suppressed.
-        let saved = std::mem::take(&mut self.arc_rc_names);
+        let saved_arc = std::mem::take(&mut self.arc_rc_names);
+        let saved_copy = std::mem::take(&mut self.copy_names);
         for input in &node.sig.inputs {
             if let FnArg::Typed(pt) = input {
-                if type_is_arc_rc(&pt.ty) {
-                    if let Some(name) = binding_name(&pt.pat) {
-                        self.arc_rc_names.insert(name);
+                if let Some(name) = binding_name(&pt.pat) {
+                    if type_is_arc_rc(&pt.ty) {
+                        self.arc_rc_names.insert(name.clone());
+                    }
+                    if type_is_copy_primitive(&pt.ty) {
+                        self.copy_names.insert(name);
                     }
                 }
             }
         }
         syn::visit::visit_item_fn(self, node);
-        self.arc_rc_names = saved;
+        self.arc_rc_names = saved_arc;
+        self.copy_names = saved_copy;
     }
 
     fn visit_local(&mut self, node: &'ast Local) {
-        if let Some(init) = &node.init {
-            if expr_is_arc_rc_ctor(&init.expr) {
-                if let Some(name) = binding_name(&node.pat) {
+        if let Some(name) = binding_name(&node.pat) {
+            // `let x: i32 = ..` records a Copy binding.
+            if let Pat::Type(pt) = &node.pat {
+                if type_is_copy_primitive(&pt.ty) {
+                    self.copy_names.insert(name.clone());
+                }
+            }
+            if let Some(init) = &node.init {
+                if expr_is_arc_rc_ctor(&init.expr) {
                     self.arc_rc_names.insert(name);
                 }
             }
@@ -138,9 +174,20 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
         if self.state.should_bail() {
             return;
         }
+        // A `for x in <range>` variable is always an integer or char (Copy), so
+        // `x.clone()` in the body is a no-op copy, not a heap clone.
+        let range_var = matches!(&*node.expr, Expr::Range(_))
+            .then(|| binding_name(&node.pat))
+            .flatten();
+        if let Some(name) = &range_var {
+            self.copy_names.insert(name.clone());
+        }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
+        if let Some(name) = &range_var {
+            self.copy_names.remove(name);
+        }
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
@@ -172,11 +219,13 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if self.state.in_loop() && node.method == "clone" {
-            // Skip Arc/Rc reference-count clones (cheap and idiomatic).
-            let is_arc_rc_clone = simple_receiver_name(&node.receiver)
-                .is_some_and(|name| self.arc_rc_names.contains(&name));
+            // Skip Arc/Rc reference-count clones and Copy-primitive clones
+            // (both are cheap; the latter is already clippy::clone_on_copy).
+            let skip = simple_receiver_name(&node.receiver).is_some_and(|name| {
+                self.arc_rc_names.contains(&name) || self.copy_names.contains(&name)
+            });
 
-            if !is_arc_rc_clone {
+            if !skip {
                 let span = node.method.span();
                 let line = span.start().line;
                 let column = span.start().column;
@@ -338,6 +387,55 @@ mod tests {
         let config = Config::default();
         let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
         RegexInLoopRule.check(&ctx)
+    }
+
+    // Copy-primitive clones must NOT be flagged (clippy::clone_on_copy covers them).
+    #[test]
+    fn test_copy_range_loop_var_clone_not_flagged() {
+        let source = r#"
+            fn sum() -> i32 {
+                let mut total = 0i32;
+                for n in 0..10i32 { total += n.clone(); }
+                total
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "clone of a Copy range loop variable must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_copy_param_clone_not_flagged() {
+        let source = r#"
+            fn run(n: usize) -> usize {
+                let mut total = 0;
+                for _ in 0..5 { total += n.clone(); }
+                total
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "clone of a Copy-typed parameter must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_heap_clone_still_flagged_alongside_copy() {
+        // A String clone in the same loop must still fire even when Copy tracking is active.
+        let source = r#"
+            fn run(name: &str) {
+                for n in 0..5i32 {
+                    let _ = n.clone();
+                    let _ = name.to_string().clone();
+                }
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "the heap clone must still be flagged, the Copy clone must not"
+        );
     }
 
     // Clone in loop tests
