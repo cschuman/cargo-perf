@@ -1,3 +1,4 @@
+// perf-guard: async-block-in-async
 // Negative: `.connect()` / `.bind()` on custom types (a pool, a query builder)
 // are not `std::net` blocking calls.
 async fn setup() {

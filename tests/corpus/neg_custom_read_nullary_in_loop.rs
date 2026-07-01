@@ -1,3 +1,4 @@
+// perf-guard: mutex-in-loop
 // Negative: a nullary `.read()` on a custom (non-lock) type is a domain method,
 // not lock contention. mutex-in-loop must only fire on real lock guards.
 struct Sensor;

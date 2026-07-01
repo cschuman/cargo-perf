@@ -1,3 +1,4 @@
+// perf-guard: lock-across-await
 // Negative: awaiting with no lock held is ordinary async code.
 async fn fine() {
     let x = compute().await;

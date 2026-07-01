@@ -1,3 +1,4 @@
+// perf-guard: n-plus-one-query
 // Negative: a custom `.load()` with no database connection argument and no ORM
 // import is not an N+1 query.
 struct Cache;

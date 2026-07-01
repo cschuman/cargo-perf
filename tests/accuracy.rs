@@ -35,6 +35,7 @@ const MIN_PRECISION: f64 = 0.90;
 const MIN_RECALL: f64 = 0.90;
 
 const EXPECT_MARKER: &str = "// perf-expect:";
+const GUARD_MARKER: &str = "// perf-guard:";
 
 type Finding = (String, usize);
 
@@ -67,6 +68,24 @@ fn actual_findings(path: &Path, source: &str) -> BTreeSet<Finding> {
     for rule in registry::all_rules() {
         for diag in rule.check(&ctx) {
             set.insert((diag.rule_id.to_string(), diag.line));
+        }
+    }
+    set
+}
+
+/// Parse `// perf-guard: <rule-id>[, ...]` markers: the rule ids this fixture is
+/// a declared negative (false-positive) guard for. The fixture must stay silent
+/// for those rules (enforced by the scorecard's no-marker == false-positive rule).
+fn guard_markers(source: &str) -> BTreeSet<String> {
+    let mut set = BTreeSet::new();
+    for line in source.lines() {
+        if let Some(pos) = line.find(GUARD_MARKER) {
+            for rule_id in line[pos + GUARD_MARKER.len()..].split(',') {
+                let rule_id = rule_id.trim();
+                if !rule_id.is_empty() {
+                    set.insert(rule_id.to_string());
+                }
+            }
         }
     }
     set
@@ -206,6 +225,18 @@ fn accuracy_scorecard_meets_floor() {
     println!("{report}");
     eprintln!("{report}");
 
+    // Per-rule floor: a single rule's false positives must not be able to hide
+    // behind the aggregate. Every rule that fired at all must clear the floor.
+    for (rule, c) in &per_rule {
+        let pr = precision(*c);
+        let rc = recall(*c);
+        if pr < MIN_PRECISION || rc < MIN_RECALL {
+            failures.push(format!(
+                "RULE BELOW FLOOR: {rule} precision {pr:.2} (>= {MIN_PRECISION:.2}?) recall {rc:.2} (>= {MIN_RECALL:.2}?)"
+            ));
+        }
+    }
+
     let p = precision(overall);
     let r = recall(overall);
 
@@ -222,5 +253,44 @@ fn accuracy_scorecard_meets_floor() {
         } else {
             format!("\n{}\n", failures.join("\n"))
         }
+    );
+}
+
+/// Coverage gate: every registered rule must be exercised by BOTH a positive
+/// fixture (a `// perf-expect:` that proves it fires when it should) AND a
+/// negative fixture (a `// perf-guard:` that proves it stays silent when it
+/// shouldn't). This is what keeps the scorecard from being vacuous: a rule with
+/// no positive fixture could regress to never-firing undetected, and a rule with
+/// no negative fixture has no false-positive floor at all.
+#[test]
+fn every_rule_has_positive_and_negative_fixtures() {
+    let fixtures = corpus_fixtures();
+    let mut positives: BTreeSet<String> = BTreeSet::new();
+    let mut guards: BTreeSet<String> = BTreeSet::new();
+    for path in &fixtures {
+        let source = std::fs::read_to_string(path).expect("read fixture");
+        for (rule, _) in expected_findings(&source) {
+            positives.insert(rule);
+        }
+        for rule in guard_markers(&source) {
+            guards.insert(rule);
+        }
+    }
+
+    let mut missing = Vec::new();
+    for rule in registry::all_rules() {
+        let id = rule.id().to_string();
+        if !positives.contains(&id) {
+            missing.push(format!("  {id}: no positive fixture (// perf-expect: {id})"));
+        }
+        if !guards.contains(&id) {
+            missing.push(format!("  {id}: no negative fixture (// perf-guard: {id})"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "every registered rule needs a positive AND a negative fixture; missing:\n{}",
+        missing.join("\n")
     );
 }
