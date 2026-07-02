@@ -1057,8 +1057,8 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let method = node.method.to_string();
         if self.state.in_loop() {
-            let method = node.method.to_string();
             // `lock`/`try_lock` are unambiguous lock acquisitions. `read`/`write`
             // (and their `try_` variants) are lock acquisitions ONLY when nullary:
             // `RwLock::read()` takes no args, whereas `io::Read::read(buf)` /
@@ -1095,7 +1095,26 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
                 });
             }
         }
-        syn::visit::visit_expr_method_call(self, node);
+
+        // `for_each`/`try_for_each` invoke their closure once per element, so a lock
+        // acquired inside the closure body contends exactly like one inside a
+        // `for`/`while`/`loop`. Visit the receiver chain OUTSIDE loop scope — a lock
+        // on the receiver side (e.g. `m.lock().unwrap(); items.iter().for_each(..)`
+        // written inline) is acquired once, not per element — then treat the closure
+        // argument(s) as a loop body (D24). Lazy adapters (`map`, `filter`, `fold`,
+        // ...) are a deliberate known-gap: a syn-only tool cannot see whether or when
+        // they are consumed, so flagging them would risk firing on a never-run
+        // closure. Non-`for_each` calls recurse via the default walker.
+        if matches!(method.as_str(), "for_each" | "try_for_each") {
+            self.visit_expr(&node.receiver);
+            self.state.enter_loop();
+            for arg in &node.args {
+                self.visit_expr(arg);
+            }
+            self.state.exit_loop();
+        } else {
+            syn::visit::visit_expr_method_call(self, node);
+        }
     }
 }
 
@@ -1698,6 +1717,72 @@ mod tests {
             "type-annotated lock local must fire: {:?}",
             check_mutex_loop(source)
         );
+    }
+
+    #[test]
+    fn test_mutex_lock_in_for_each_closure_flagged() {
+        // D24: a Mutex locked once per element inside a `for_each` closure contends
+        // exactly like a syntactic loop, even though there is no for/while/loop.
+        let source = r#"
+            use std::sync::Mutex;
+            fn tally(counter: &Mutex<i32>, items: &[i32]) {
+                items.iter().for_each(|x| {
+                    *counter.lock().unwrap() += *x;
+                });
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert_eq!(diagnostics.len(), 1, "for_each lock must fire: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("lock"));
+    }
+
+    #[test]
+    fn test_mutex_lock_in_try_for_each_closure_flagged() {
+        let source = r#"
+            use std::sync::Mutex;
+            fn tally(counter: &Mutex<i32>, items: &[i32]) -> Result<(), ()> {
+                items.iter().try_for_each(|x| {
+                    *counter.lock().unwrap() += *x;
+                    Ok(())
+                })
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert_eq!(diagnostics.len(), 1, "try_for_each lock must fire: {diagnostics:?}");
+    }
+
+    #[test]
+    fn test_mutex_lock_in_lazy_map_not_flagged_known_gap() {
+        // Known gap (curated adapter decision): lazy adapters like `.map()` are NOT
+        // treated as loops. A syn-only tool cannot see whether or when the map is
+        // consumed, so we stay conservative and accept the miss rather than risk a
+        // false positive on a never-run closure.
+        let source = r#"
+            use std::sync::Mutex;
+            fn tally(counter: &Mutex<i32>, items: &[i32]) -> Vec<i32> {
+                items.iter().map(|x| {
+                    *counter.lock().unwrap() += *x;
+                    *x
+                }).collect()
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(diagnostics.is_empty(), "lazy map is a known gap: {diagnostics:?}");
+    }
+
+    #[test]
+    fn test_for_each_lock_outside_closure_not_flagged() {
+        // The receiver chain of `for_each` is visited OUTSIDE loop scope: a lock
+        // acquired on the receiver side (not per-element) is not contention.
+        let source = r#"
+            use std::sync::Mutex;
+            fn run(m: &Mutex<i32>, items: &[i32]) {
+                let _g = m.lock().unwrap();
+                items.iter().for_each(|_x| {});
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(diagnostics.is_empty(), "lock outside the closure must not fire: {diagnostics:?}");
     }
 
     #[test]
