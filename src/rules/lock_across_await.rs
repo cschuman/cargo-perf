@@ -144,18 +144,64 @@ impl LockAcrossAwaitVisitor<'_> {
                         active.remove(&name);
                         continue;
                     }
-                    // Nested plain block: recurse so inner guards are scoped correctly.
-                    if let Expr::Block(block) = expr {
-                        self.analyze_block(&block.block.stmts, in_async, &active);
-                    } else {
-                        self.find_awaits(expr, &active);
-                    }
+                    // Recurse into nested blocks and control-flow bodies so guards
+                    // declared inside them are scoped and tracked correctly.
+                    self.analyze_flow_expr(expr, &active);
                 }
                 Stmt::Macro(_) => {
                     // Macro bodies are opaque to us; skip (documented limitation).
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Analyze an expression appearing in statement position (or as a control-flow
+    /// branch / match-arm body).
+    ///
+    /// The prior implementation only recursed into plain `{ }` blocks, so a
+    /// `let guard = m.lock()` declared *inside* an `if`/`match`/`while`/`for`/`loop`
+    /// body was never registered and a subsequent `.await` in that same body was
+    /// missed (D21, D22). Here every control-flow body is recursed into via
+    /// `analyze_block` with the currently-active guards as the outer scope, while
+    /// awaits in the parts evaluated *before* a body — an `if`/`while` condition, a
+    /// `match` scrutinee or arm guard, a `for` iterand — are checked against the
+    /// active guards directly. Awaits are attributed exactly once: conditions go
+    /// through `find_awaits`, bodies through `analyze_block`, with no overlap.
+    fn analyze_flow_expr(&mut self, expr: &Expr, active: &HashMap<String, bool>) {
+        match expr {
+            Expr::Block(b) => self.analyze_block(&b.block.stmts, true, active),
+            Expr::Unsafe(u) => self.analyze_block(&u.block.stmts, true, active),
+            Expr::If(ei) => {
+                self.find_awaits(&ei.cond, active);
+                self.analyze_block(&ei.then_branch.stmts, true, active);
+                if let Some((_, else_expr)) = &ei.else_branch {
+                    self.analyze_flow_expr(else_expr, active);
+                }
+            }
+            Expr::Match(em) => {
+                self.find_awaits(&em.expr, active);
+                for arm in &em.arms {
+                    if let Some((_, guard_expr)) = &arm.guard {
+                        self.find_awaits(guard_expr, active);
+                    }
+                    self.analyze_flow_expr(&arm.body, active);
+                }
+            }
+            Expr::While(ew) => {
+                self.find_awaits(&ew.cond, active);
+                self.analyze_block(&ew.body.stmts, true, active);
+            }
+            Expr::ForLoop(ef) => {
+                self.find_awaits(&ef.expr, active);
+                self.analyze_block(&ef.body.stmts, true, active);
+            }
+            Expr::Loop(el) => {
+                self.analyze_block(&el.body.stmts, true, active);
+            }
+            // Leaf / non-control-flow expression: attribute any awaits within it to
+            // the active guards. `find_awaits` early-returns when none are held.
+            _ => self.find_awaits(expr, active),
         }
     }
 
@@ -614,6 +660,119 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "await inside a spawned async block must not be attributed to the outer guard"
+        );
+    }
+
+    // --- Guards declared INSIDE control-flow bodies (D21, D22) ---
+
+    #[test]
+    fn test_detects_guard_declared_inside_if_body() {
+        // D21: std guard acquired and held across an await, both inside an `if` body.
+        let source = r#"
+            async fn conditional(m: &std::sync::Mutex<i32>, flag: bool) {
+                if flag {
+                    let guard = m.lock().unwrap();
+                    let _v = *guard;
+                    network_call().await;
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "std guard held across await inside an if-body must fire: {:?}",
+            diagnostics
+        );
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn test_detects_guard_declared_inside_match_arm() {
+        // D22: std guard acquired and held across an await, both inside a match arm.
+        let source = r#"
+            async fn on_event(m: &std::sync::Mutex<i32>, ev: u8) {
+                match ev {
+                    0 => {
+                        let guard = m.lock().unwrap();
+                        let _v = *guard;
+                        handle().await;
+                    }
+                    _ => {}
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "std guard held across await inside a match arm must fire: {:?}",
+            diagnostics
+        );
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn test_detects_guard_declared_inside_else_branch() {
+        // The `else` arm of an if must be recursed into as well.
+        let source = r#"
+            async fn conditional(m: &std::sync::Mutex<i32>, flag: bool) {
+                if flag {
+                } else {
+                    let guard = m.lock().unwrap();
+                    let _v = *guard;
+                    network_call().await;
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "std guard held across await inside an else-body must fire: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_detects_guard_declared_inside_while_body() {
+        // A guard acquired inside a loop body and held across an await in the same
+        // iteration is a deadlock risk just as at function level.
+        let source = r#"
+            async fn looper(m: &std::sync::Mutex<i32>) {
+                while cond() {
+                    let guard = m.lock().unwrap();
+                    let _v = *guard;
+                    other().await;
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(
+            !diagnostics.is_empty(),
+            "std guard declared inside a while-body held across await must fire"
+        );
+    }
+
+    #[test]
+    fn test_no_detection_when_guard_dropped_inside_if_body() {
+        // Recursing into the if-body must not break drop handling: a guard dropped
+        // before the await in the same body stays silent.
+        let source = r#"
+            async fn ok(m: &std::sync::Mutex<i32>, flag: bool) {
+                if flag {
+                    let guard = m.lock().unwrap();
+                    let _v = *guard;
+                    drop(guard);
+                    other().await;
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(
+            diagnostics.is_empty(),
+            "dropping a guard inside an if-body before the await must suppress: {:?}",
+            diagnostics
         );
     }
 }
