@@ -16,7 +16,7 @@
 //! recall tradeoff.
 
 use std::collections::{HashMap, HashSet};
-use syn::{File, Item, UseTree};
+use syn::{Fields, File, Item, ReturnType, Type, UseTree};
 
 /// Where a leading path segment resolves, as far as an in-file scan can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +40,16 @@ pub struct ImportOracle {
     /// Leaf-or-alias -> canonical path string, e.g. `sfs` -> `std::fs`,
     /// `Command` -> `std::process::Command`, `fs` -> `std::fs`.
     use_map: HashMap<String, String>,
+    /// Free-fn ident -> whether its declared return type mentions `Arc`/`Rc`.
+    /// Lets a `let x = make_shared();` binding be recognised as holding an
+    /// Arc/Rc — the same as a direct `Arc::new(..)` — when the factory function
+    /// is defined in this file (D9).
+    fn_returns_arc_rc: HashMap<String, bool>,
+    /// Struct field ident -> whether EVERY field of that name across all structs
+    /// in the file has an `Arc`/`Rc` type. A name shared by an Arc field and a
+    /// non-Arc field collapses to `false`, so `self.state.clone()` is treated as
+    /// a cheap Arc clone only when the field type is unambiguously Arc/Rc (D10).
+    field_is_arc_rc: HashMap<String, bool>,
 }
 
 impl ImportOracle {
@@ -55,10 +65,18 @@ impl ImportOracle {
     fn record_item(&mut self, item: &Item) {
         match item {
             Item::Use(u) => self.record_use_tree(&u.tree, String::new()),
-            Item::Struct(s) => self.add_local(&s.ident),
+            Item::Struct(s) => {
+                self.add_local(&s.ident);
+                self.record_fields(&s.fields);
+            }
             Item::Enum(e) => self.add_local(&e.ident),
             Item::Mod(m) => self.add_local(&m.ident),
-            Item::Fn(f) => self.add_local(&f.sig.ident),
+            Item::Fn(f) => {
+                self.add_local(&f.sig.ident);
+                let returns_arc = return_type_mentions_arc_rc(&f.sig.output);
+                self.fn_returns_arc_rc
+                    .insert(f.sig.ident.to_string(), returns_arc);
+            }
             Item::Type(t) => self.add_local(&t.ident),
             Item::Trait(t) => self.add_local(&t.ident),
             Item::Const(c) => self.add_local(&c.ident),
@@ -70,6 +88,22 @@ impl ImportOracle {
 
     fn add_local(&mut self, ident: &syn::Ident) {
         self.local_items.insert(ident.to_string());
+    }
+
+    /// Record each named field's Arc/Rc-ness. On a name collision, `&=` collapses
+    /// the entry to `false` the moment any same-named field is non-Arc, keeping the
+    /// predicate conservative (see [`ImportOracle::field_is_arc_rc`]). Tuple and
+    /// unit fields have no ident and are skipped.
+    fn record_fields(&mut self, fields: &Fields) {
+        if let Fields::Named(named) = fields {
+            for field in &named.named {
+                if let Some(ident) = &field.ident {
+                    let is_arc = type_mentions_arc_rc(&field.ty);
+                    let entry = self.field_is_arc_rc.entry(ident.to_string()).or_insert(true);
+                    *entry &= is_arc;
+                }
+            }
+        }
     }
 
     /// Walk a `use` tree, accumulating the module prefix, recording each imported
@@ -137,6 +171,43 @@ impl ImportOracle {
             };
         }
         Origin::Unknown
+    }
+
+    /// True if a file-scope free function named `name` is declared to return an
+    /// `Arc`/`Rc`. Unknown names and non-Arc / unit returns are `false` (D9).
+    pub fn local_fn_return_mentions_arc_rc(&self, name: &str) -> bool {
+        self.fn_returns_arc_rc.get(name).copied().unwrap_or(false)
+    }
+
+    /// True if `name` is a struct field whose type is unambiguously `Arc`/`Rc`
+    /// across every same-named field in the file. Unknown or ambiguous names are
+    /// `false` (D10).
+    pub fn local_field_type_mentions_arc_rc(&self, name: &str) -> bool {
+        self.field_is_arc_rc.get(name).copied().unwrap_or(false)
+    }
+}
+
+/// True if a return type is `-> Arc<..>` / `-> Rc<..>` (peeling references).
+fn return_type_mentions_arc_rc(output: &ReturnType) -> bool {
+    match output {
+        ReturnType::Default => false,
+        ReturnType::Type(_, ty) => type_mentions_arc_rc(ty),
+    }
+}
+
+/// True if `ty` is an `Arc`/`Rc` — or a reference to one. Matches on the final
+/// path segment, so both `Arc<T>` and `std::sync::Arc<T>` qualify. This is a
+/// name-level heuristic: a user type literally named `Arc`/`Rc` would match, but
+/// that is vanishingly rare and only ever suppresses a clone-in-loop finding.
+fn type_mentions_arc_rc(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(r) => type_mentions_arc_rc(&r.elem),
+        Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Arc" || seg.ident == "Rc"),
+        _ => false,
     }
 }
 
@@ -242,5 +313,69 @@ mod tests {
         let o = oracle("fn f() {}");
         assert_eq!(o.origin("Command"), Origin::Unknown);
         assert_eq!(o.canonicalize("Command::new"), "Command::new");
+    }
+
+    // --- Arc/Rc factory-fn and field-type recording (D9 / D10) ---
+
+    #[test]
+    fn fn_returning_arc_is_recorded() {
+        let o = oracle("use std::sync::Arc; fn shared() -> Arc<Config> { todo!() } struct Config;");
+        assert!(o.local_fn_return_mentions_arc_rc("shared"));
+    }
+
+    #[test]
+    fn fn_returning_arc_via_full_path_is_recorded() {
+        let o = oracle("fn shared() -> std::sync::Arc<u8> { todo!() }");
+        assert!(o.local_fn_return_mentions_arc_rc("shared"));
+    }
+
+    #[test]
+    fn fn_returning_rc_reference_is_recorded() {
+        let o = oracle("fn shared() -> &'static std::rc::Rc<u8> { todo!() }");
+        assert!(o.local_fn_return_mentions_arc_rc("shared"));
+    }
+
+    #[test]
+    fn fn_returning_non_arc_is_not_recorded() {
+        let o = oracle("fn make() -> Vec<u8> { vec![] }");
+        assert!(!o.local_fn_return_mentions_arc_rc("make"));
+    }
+
+    #[test]
+    fn unknown_or_unit_fn_return_is_false() {
+        let o = oracle("fn f() {}");
+        assert!(!o.local_fn_return_mentions_arc_rc("nonexistent"));
+        assert!(!o.local_fn_return_mentions_arc_rc("f")); // unit return
+    }
+
+    #[test]
+    fn struct_arc_field_is_recorded() {
+        let o = oracle("use std::sync::Arc; struct S { state: Arc<Inner> } struct Inner;");
+        assert!(o.local_field_type_mentions_arc_rc("state"));
+    }
+
+    #[test]
+    fn struct_non_arc_field_is_not_recorded() {
+        let o = oracle("struct S { data: Vec<u8> }");
+        assert!(!o.local_field_type_mentions_arc_rc("data"));
+    }
+
+    #[test]
+    fn field_name_collision_collapses_to_false() {
+        // `state` is Arc in one struct but a plain Vec in another: the name is
+        // ambiguous, so the oracle refuses to claim it is Arc (conservative). The
+        // collapse holds regardless of declaration order.
+        let o = oracle("use std::sync::Arc; struct A { state: Arc<u8> } struct B { state: Vec<u8> }");
+        assert!(!o.local_field_type_mentions_arc_rc("state"));
+        let o2 =
+            oracle("use std::sync::Arc; struct B { state: Vec<u8> } struct A { state: Arc<u8> }");
+        assert!(!o2.local_field_type_mentions_arc_rc("state"));
+    }
+
+    #[test]
+    fn tuple_struct_fields_are_ignored() {
+        // No named field, so nothing is recorded and the predicate stays false.
+        let o = oracle("struct Wrapper(std::sync::Arc<u8>);");
+        assert!(!o.local_field_type_mentions_arc_rc("0"));
     }
 }
