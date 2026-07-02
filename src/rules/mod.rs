@@ -5,6 +5,7 @@ pub mod iter_rules;
 pub mod lock_across_await;
 pub mod memory_rules;
 pub mod registry;
+pub mod resolve;
 pub mod visitor;
 
 use crate::engine::AnalysisContext;

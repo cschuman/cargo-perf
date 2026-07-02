@@ -1,3 +1,4 @@
+use super::resolve::{is_std_root, ImportOracle};
 use super::visitor::VisitorState;
 use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
@@ -54,6 +55,7 @@ impl Rule for UnboundedChannelRule {
             ctx,
             diagnostics: Vec::new(),
             state: VisitorState::new(),
+            imports: ImportOracle::from_file(ctx.ast),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -64,6 +66,7 @@ struct UnboundedChannelVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     state: VisitorState,
+    imports: ImportOracle,
 }
 
 /// Unbounded channel patterns and their bounded alternatives
@@ -212,6 +215,13 @@ impl UnboundedChannelVisitor<'_> {
         path_str: &str,
         span: proc_macro2::Span,
     ) {
+        // A locally-defined item shadows the outer name: a user `fn
+        // unbounded_channel` / `mod flume` is not the runtime primitive.
+        let leading = path_str.split("::").next().unwrap_or(path_str);
+        if self.imports.is_local_item(leading) {
+            return;
+        }
+
         // Special case: std::sync::mpsc::channel is unbounded, but tokio::sync::mpsc::channel is bounded
         // We need to detect std's channel without flagging tokio's
         for &pattern in STD_MPSC_CHANNEL_PATTERNS {
@@ -598,6 +608,7 @@ impl Rule for AsyncBlockInAsyncRule {
             diagnostics: Vec::new(),
             in_async_fn: false,
             state: VisitorState::new(),
+            imports: ImportOracle::from_file(ctx.ast),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -609,6 +620,17 @@ struct AsyncBlockingVisitor<'a> {
     diagnostics: Vec<Diagnostic>,
     in_async_fn: bool,
     state: VisitorState,
+    imports: ImportOracle,
+}
+
+/// If `path` contains a segment equal to `type_leaf`, return the leading
+/// segments up to and including it as owned strings, e.g. path
+/// `tokio::process::Command::new` with leaf `Command` -> `["tokio", "process",
+/// "Command"]`. Returns `None` if the leaf is absent.
+fn path_segments_up_to(path: &syn::Path, type_leaf: &str) -> Option<Vec<String>> {
+    let idents: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let pos = idents.iter().position(|s| s == type_leaf)?;
+    Some(idents[..=pos].to_vec())
 }
 
 /// Known blocking calls that should be avoided in async contexts
@@ -691,31 +713,35 @@ impl AsyncBlockingVisitor<'_> {
         prefix_len == 0 || full_path[..prefix_len].ends_with("::")
     }
 
-    /// True if the receiver chain of a method call syntactically mentions
-    /// `type_leaf` as a path segment, e.g. `Command::new("ls").arg("-l")`
-    /// mentions `Command`. This is what lets `.output()` fire on a real
-    /// `std::process::Command` while staying silent on an arbitrary `.output()`.
-    fn receiver_mentions_type(expr: &Expr, type_leaf: &str, depth: usize) -> bool {
+    /// If the receiver chain of a method call syntactically mentions `type_leaf`
+    /// as a path segment, return the path segments *up to and including* that
+    /// leaf, e.g. `tokio::process::Command::new("ls")` with leaf `Command`
+    /// yields `["tokio", "process", "Command"]` and a bare `Command::new(..)`
+    /// yields `["Command"]`. Returning the qualifier (rather than a bare bool)
+    /// lets the caller canonicalize it through the import oracle and decide
+    /// whether it is really the std type — so `.output()` fires on a genuine
+    /// `std::process::Command` but not on a user type or the tokio async form.
+    fn receiver_type_path(expr: &Expr, type_leaf: &str, depth: usize) -> Option<Vec<String>> {
         if depth > 16 {
-            return false;
+            return None;
         }
         match expr {
-            Expr::MethodCall(m) => Self::receiver_mentions_type(&m.receiver, type_leaf, depth + 1),
+            Expr::MethodCall(m) => Self::receiver_type_path(&m.receiver, type_leaf, depth + 1),
             Expr::Call(c) => {
                 if let Expr::Path(p) = &*c.func {
-                    if p.path.segments.iter().any(|s| s.ident == type_leaf) {
-                        return true;
+                    if let Some(segs) = path_segments_up_to(&p.path, type_leaf) {
+                        return Some(segs);
                     }
                 }
-                Self::receiver_mentions_type(&c.func, type_leaf, depth + 1)
+                Self::receiver_type_path(&c.func, type_leaf, depth + 1)
             }
-            Expr::Path(p) => p.path.segments.iter().any(|s| s.ident == type_leaf),
-            Expr::Reference(r) => Self::receiver_mentions_type(&r.expr, type_leaf, depth + 1),
-            Expr::Paren(p) => Self::receiver_mentions_type(&p.expr, type_leaf, depth + 1),
-            Expr::Field(f) => Self::receiver_mentions_type(&f.base, type_leaf, depth + 1),
-            Expr::Try(t) => Self::receiver_mentions_type(&t.expr, type_leaf, depth + 1),
-            Expr::Await(a) => Self::receiver_mentions_type(&a.base, type_leaf, depth + 1),
-            _ => false,
+            Expr::Path(p) => path_segments_up_to(&p.path, type_leaf),
+            Expr::Reference(r) => Self::receiver_type_path(&r.expr, type_leaf, depth + 1),
+            Expr::Paren(p) => Self::receiver_type_path(&p.expr, type_leaf, depth + 1),
+            Expr::Field(f) => Self::receiver_type_path(&f.base, type_leaf, depth + 1),
+            Expr::Try(t) => Self::receiver_type_path(&t.expr, type_leaf, depth + 1),
+            Expr::Await(a) => Self::receiver_type_path(&a.base, type_leaf, depth + 1),
+            _ => None,
         }
     }
 
@@ -729,8 +755,22 @@ impl AsyncBlockingVisitor<'_> {
         span: proc_macro2::Span,
         call_node: Option<&ExprCall>,
     ) {
-        // Never flag the async replacements themselves when written in full.
-        if full_path.starts_with("tokio::") || full_path.starts_with("async_std::") {
+        // A locally-defined item shadows the outer name: a user `mod fs` /
+        // `mod net` / `struct Command` is not the std item, so its calls never
+        // block. This is checked before canonicalization because a local item
+        // is authoritative regardless of any same-named import.
+        let leading = full_path.split("::").next().unwrap_or(full_path);
+        if self.imports.is_local_item(leading) {
+            return;
+        }
+
+        // Rewrite the leading segment through the `use` map so aliases resolve
+        // to their canonical path: `sfs::read_to_string` -> `std::fs::…`.
+        let canon = self.imports.canonicalize(full_path);
+
+        // Never flag the async replacements themselves when written in full
+        // (or reached via an alias that canonicalizes into them).
+        if canon.starts_with("tokio::") || canon.starts_with("async_std::") {
             return;
         }
 
@@ -739,7 +779,7 @@ impl AsyncBlockingVisitor<'_> {
         for (module_path, func_name, alternative) in BLOCKING_CALLS {
             let leaf = Self::module_leaf(module_path);
             let needle = format!("{leaf}::{func_name}");
-            if Self::path_ends_with_boundary(full_path, &needle) && needle.len() > best_len {
+            if Self::path_ends_with_boundary(&canon, &needle) && needle.len() > best_len {
                 best = Some((func_name, alternative));
                 best_len = needle.len();
             }
@@ -768,7 +808,29 @@ impl AsyncBlockingVisitor<'_> {
                 continue;
             }
             let leaf = Self::module_leaf(module_path);
-            if Self::receiver_mentions_type(receiver, leaf, 0) && func_name.len() > best_len {
+            let Some(segs) = Self::receiver_type_path(receiver, leaf, 0) else {
+                continue;
+            };
+            // The receiver mentions the type name; now decide whether it is
+            // really the std type. A locally-defined item of that name shadows
+            // it (`struct Command`), an alias / import may re-root it, and the
+            // tokio/async_std forms are the recommended fix, not a defect.
+            let qualifier = segs.first().map(String::as_str).unwrap_or("");
+            if self.imports.is_local_item(qualifier) {
+                continue;
+            }
+            let canon = self.imports.canonicalize(&segs.join("::"));
+            if canon.starts_with("tokio::") || canon.starts_with("async_std::") {
+                continue;
+            }
+            // Require positive evidence that the receiver type is std-rooted:
+            // a fully-qualified `std::…::Command` or a `use` that canonicalizes
+            // into std. A bare, unqualified `Command` with no in-file evidence
+            // is left alone (precision-first — cargo-perf can't resolve it).
+            if !is_std_root(&canon) {
+                continue;
+            }
+            if func_name.len() > best_len {
                 best = Some((func_name, alternative));
                 best_len = func_name.len();
             }
@@ -972,6 +1034,111 @@ mod tests {
             r#"async fn run() { let _ = std::fs::read_to_string("x"); }"#,
         );
         assert_eq!(diags.len(), 1, "std::fs::read_to_string must still flag: {diags:?}");
+    }
+
+    // ========================================================================
+    // Import/shadow oracle gating (D1, D2, D6, D7, D8)
+    // ========================================================================
+
+    #[test]
+    fn test_user_struct_named_command_not_blocking() {
+        // D1: a locally-defined `struct Command` with an `.output()` method is
+        // NOT std::process::Command; the receiver `Command::new(..)` mentions
+        // "Command" but the item is shadowed in-file.
+        let diags = check_blocking_code(
+            r#"
+            struct Command { label: String }
+            impl Command {
+                fn new(label: &str) -> Self { Command { label: label.to_string() } }
+                fn output(&self) -> String { self.label.clone() }
+            }
+            async fn run() -> String { Command::new("x").output() }
+            "#,
+        );
+        assert!(diags.is_empty(), "user struct Command flagged: {diags:?}");
+    }
+
+    #[test]
+    fn test_user_mod_net_tcpstream_not_blocking() {
+        // D2: a local `mod net` with its own `TcpStream::connect` is not
+        // std::net::TcpStream.
+        let diags = check_blocking_code(
+            r#"
+            mod net {
+                pub struct TcpStream;
+                impl TcpStream { pub fn connect(_a: &str) -> Self { TcpStream } }
+            }
+            async fn run() { let _ = net::TcpStream::connect("127.0.0.1:8080"); }
+            "#,
+        );
+        assert!(diags.is_empty(), "user mod net::TcpStream flagged: {diags:?}");
+    }
+
+    #[test]
+    fn test_user_mod_fs_read_not_blocking() {
+        // D6: a local `mod fs` with a free `read` fn is not std::fs::read.
+        let diags = check_blocking_code(
+            r#"
+            mod fs { pub fn read(_p: &str) -> u8 { 0 } }
+            async fn run() { let _ = fs::read("x"); }
+            "#,
+        );
+        assert!(diags.is_empty(), "user mod fs::read flagged: {diags:?}");
+    }
+
+    #[test]
+    fn test_aliased_std_fs_still_blocks() {
+        // D7: `use std::fs as sfs;` then `sfs::read_to_string(..)` is a real
+        // blocking call and must fire.
+        let diags = check_blocking_code(
+            r#"
+            use std::fs as sfs;
+            async fn run() { let _ = sfs::read_to_string("x"); }
+            "#,
+        );
+        assert_eq!(diags.len(), 1, "aliased std::fs must flag: {diags:?}");
+    }
+
+    #[test]
+    fn test_tokio_command_output_await_not_blocking() {
+        // D8: the CORRECT async form must never be flagged — it is the fix the
+        // rule itself recommends.
+        let diags = check_blocking_code(
+            r#"
+            async fn run() -> std::process::Output {
+                tokio::process::Command::new("ls").output().await.unwrap()
+            }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "tokio::process::Command...output().await flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn test_use_std_process_command_output_still_blocks() {
+        // Guard the other direction: `use std::process::Command;` then
+        // `Command::new(..).output()` must still fire via the use-map.
+        let diags = check_blocking_code(
+            r#"
+            use std::process::Command;
+            async fn run() { let _ = Command::new("ls").output(); }
+            "#,
+        );
+        assert_eq!(diags.len(), 1, "imported std Command::output must flag: {diags:?}");
+    }
+
+    #[test]
+    fn test_user_unbounded_channel_fn_not_flagged() {
+        // D35: a local `fn unbounded_channel` is unrelated to tokio.
+        let diags = check_channel_code(
+            r#"
+            fn unbounded_channel() -> Vec<u8> { Vec::new() }
+            fn run() { let _q = unbounded_channel(); }
+            "#,
+        );
+        assert!(diags.is_empty(), "user unbounded_channel fn flagged: {diags:?}");
     }
 
     // ========================================================================

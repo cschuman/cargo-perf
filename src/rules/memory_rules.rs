@@ -1,3 +1,4 @@
+use super::resolve::ImportOracle;
 use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
@@ -277,6 +278,7 @@ impl Rule for RegexInLoopRule {
             ctx,
             diagnostics: Vec::new(),
             state: VisitorState::new(),
+            imports: ImportOracle::from_file(ctx.ast),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -287,6 +289,7 @@ struct RegexInLoopVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     state: VisitorState,
+    imports: ImportOracle,
 }
 
 impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
@@ -329,14 +332,20 @@ impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.state.in_loop() {
             if let Expr::Path(ExprPath { path, .. }) = &*node.func {
-                let path_str = path
+                // Match `Regex::new` on exact `::`-segment boundaries, not as a
+                // substring: a user `RegexCacheKey::new` merely *contains*
+                // "Regex" and has no compilation cost. The regex crate's type
+                // is spelled exactly `Regex` (`Regex::new`, `regex::Regex::new`,
+                // `fancy_regex::Regex::new`, …), and the constructor is `new`.
+                let has_regex_segment = path.segments.iter().any(|s| s.ident == "Regex");
+                let ends_with_new = path
                     .segments
-                    .iter()
-                    .map(|s| s.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::");
+                    .last()
+                    .is_some_and(|s| s.ident == "new");
+                // A locally-defined `struct Regex` shadows the crate type.
+                let shadowed = self.imports.is_local_item("Regex");
 
-                if path_str.contains("Regex") && path_str.contains("new") {
+                if has_regex_segment && ends_with_new && !shadowed {
                     let span = path
                         .segments
                         .last()
@@ -555,6 +564,26 @@ mod tests {
         "#;
         let diagnostics = check_regex_rule(source);
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_regex_cache_key_not_flagged() {
+        // D33: a custom type whose name merely *contains* "Regex" is not the
+        // regex crate; constructing it in a loop has no compilation cost.
+        let source = r#"
+            struct RegexCacheKey { id: u32 }
+            impl RegexCacheKey { fn new(id: u32) -> Self { RegexCacheKey { id } } }
+            fn test() {
+                for id in 0..10 {
+                    let _k = RegexCacheKey::new(id);
+                }
+            }
+        "#;
+        let diagnostics = check_regex_rule(source);
+        assert!(
+            diagnostics.is_empty(),
+            "RegexCacheKey::new flagged as regex compile: {diagnostics:?}"
+        );
     }
 
     #[test]
