@@ -67,6 +67,19 @@ impl LockAcrossAwaitVisitor<'_> {
                 let method = call.method.to_string();
                 for &lock_method in LOCK_METHODS {
                     if method == lock_method {
+                        // `read`/`write` (and their `try_` forms) are lock
+                        // acquisitions ONLY when nullary: `RwLock::read()` /
+                        // `RwLock::write()` take no arguments, whereas
+                        // `io::Read::read(buf)` / `io::Write::write(buf)` take a
+                        // buffer and are ordinary async/sync I/O, not a guard.
+                        // `lock`/`try_lock` are unambiguous and stay unconditional.
+                        let is_read_write = matches!(
+                            lock_method,
+                            "read" | "try_read" | "write" | "try_write"
+                        );
+                        if is_read_write && !call.args.is_empty() {
+                            return None;
+                        }
                         return Some(lock_method);
                     }
                 }
@@ -660,6 +673,72 @@ mod tests {
         assert!(
             diagnostics.is_empty(),
             "await inside a spawned async block must not be attributed to the outer guard"
+        );
+    }
+
+    // --- read/write name-collision with async I/O (D19, D20) ---
+
+    #[test]
+    fn test_async_io_read_not_treated_as_lock_guard() {
+        // D19: `reader.read(&mut buf).await` is idiomatic tokio AsyncReadExt I/O; the
+        // bound `n` is a byte count, not a lock guard. `read` with an argument is I/O,
+        // not `RwLock::read()` (which is nullary), so nothing must be flagged.
+        let source = r#"
+            use tokio::io::AsyncReadExt;
+            async fn copy_stream<R: AsyncReadExt + Unpin>(reader: &mut R) {
+                let mut buf = [0u8; 1024];
+                let n = reader.read(&mut buf).await.unwrap();
+                flush().await;
+                let _ = n;
+            }
+            async fn flush() {}
+        "#;
+        let diagnostics = check_code(source);
+        assert!(
+            diagnostics.is_empty(),
+            "async I/O read (with a buffer arg) must not be treated as a lock guard: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_sync_io_write_not_treated_as_lock_guard() {
+        // D20: `buf.write(data)` is `std::io::Write` on a Vec<u8>; the bound `n` is a
+        // byte count, not a lock guard. `write` with an argument is I/O, not
+        // `RwLock::write()` (which is nullary).
+        let source = r#"
+            use std::io::Write;
+            async fn dump(buf: &mut Vec<u8>, data: &[u8]) {
+                let n = buf.write(data).unwrap();
+                commit().await;
+                let _ = n;
+            }
+            async fn commit() {}
+        "#;
+        let diagnostics = check_code(source);
+        assert!(
+            diagnostics.is_empty(),
+            "sync I/O write (with a buffer arg) must not be treated as a lock guard: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_nullary_rwlock_read_still_detected() {
+        // Guard: the genuine RwLock case (nullary `read()`) must still fire after the
+        // arity discriminator is added.
+        let source = r#"
+            async fn bad(lock: &tokio::sync::RwLock<i32>) {
+                let guard = lock.read().await;
+                other().await;
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "nullary RwLock::read().await guard must still fire: {:?}",
+            diagnostics
         );
     }
 
