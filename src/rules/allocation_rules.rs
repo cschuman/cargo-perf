@@ -1001,11 +1001,17 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
         // same name) must clear the stale entry so an ordinary `.read()`/`.lock()`
         // domain method on the new binding is not mistaken for lock contention.
         if let Some(name) = mutex_binding_name(&node.pat) {
-            if node
+            // Two channels mark a local as a lock: (1) an explicit type annotation
+            // that mentions a lock (`let m: Arc<Mutex<_>> = shared.clone();`), where
+            // the initializer is not a ctor, and (2) an initializer that constructs a
+            // lock (`let m = Mutex::new(..)`). Either suffices.
+            let annotated_lock =
+                matches!(&node.pat, Pat::Type(pt) if type_mentions_lock(&pt.ty));
+            let ctor_lock = node
                 .init
                 .as_ref()
-                .is_some_and(|init| expr_is_lock_ctor(&init.expr))
-            {
+                .is_some_and(|init| expr_is_lock_ctor(&init.expr));
+            if annotated_lock || ctor_lock {
                 self.lock_names.insert(name);
             } else {
                 self.lock_names.remove(&name);
@@ -1668,6 +1674,30 @@ mod tests {
         "#;
         let diagnostics = check_mutex_loop(source);
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_type_annotated_lock_local_flagged() {
+        // D23: a local whose TYPE annotation is a lock (`m: Arc<Mutex<u64>>`) but
+        // whose initializer is `.clone()` (not a ctor) still holds a lock. Locking
+        // it every iteration is the antipattern; the local-type channel must track it.
+        let source = r#"
+            use std::sync::{Arc, Mutex};
+            fn run(shared: &Arc<Mutex<u64>>) {
+                let m: Arc<Mutex<u64>> = shared.clone();
+                let mut i = 0;
+                while i < 50 {
+                    *m.lock().unwrap() += 1;
+                    i += 1;
+                }
+            }
+        "#;
+        assert_eq!(
+            check_mutex_loop(source).len(),
+            1,
+            "type-annotated lock local must fire: {:?}",
+            check_mutex_loop(source)
+        );
     }
 
     #[test]
