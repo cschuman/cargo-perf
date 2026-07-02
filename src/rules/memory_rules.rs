@@ -169,6 +169,19 @@ fn unref_simple_name(expr: &Expr) -> Option<String> {
     }
 }
 
+/// The field identifier of a named field-access receiver — `self.state` ->
+/// `state`, `obj.cache` -> `cache`. Returns None for tuple fields (`self.0`) and
+/// non-field expressions. Used to recognise a `.clone()` whose receiver is an
+/// Arc/Rc struct field, which the oracle keys by field name (D10).
+fn field_receiver_name(expr: &Expr) -> Option<String> {
+    if let Expr::Field(field) = expr {
+        if let syn::Member::Named(ident) = &field.member {
+            return Some(ident.to_string());
+        }
+    }
+    None
+}
+
 impl CloneInLoopVisitor<'_> {
     /// True if `expr` is `<name>.clone()` where `name` already holds an Arc/Rc.
     /// The result is itself an Arc/Rc handle (a refcount bump), so a binding
@@ -352,11 +365,18 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
         if self.state.in_loop() && node.method == "clone" {
             // Skip Arc/Rc reference-count clones and Copy-primitive clones
             // (both are cheap; the latter is already clippy::clone_on_copy).
-            let skip = simple_receiver_name(&node.receiver).is_some_and(|name| {
+            let skip_local = simple_receiver_name(&node.receiver).is_some_and(|name| {
                 self.arc_rc_names.contains(&name) || self.copy_names.contains(&name)
             });
+            // D10: a field receiver like `self.state.clone()` is not a local
+            // binding, so `simple_receiver_name` misses it. When the field type is
+            // unambiguously Arc/Rc across the file, the clone is a refcount bump.
+            // (UFCS `Clone::clone(&self.state)` on a field is a rare boundary and
+            // is not covered here.)
+            let skip_field = field_receiver_name(&node.receiver)
+                .is_some_and(|name| self.imports.local_field_type_mentions_arc_rc(&name));
 
-            if !skip {
+            if !skip_local && !skip_field {
                 self.emit_clone(node.method.span());
             }
         }
@@ -1117,6 +1137,79 @@ mod tests {
             check_clone_rule(source).len(),
             1,
             "rebinding the factory Arc name to an owned String must re-flag its clone"
+        );
+    }
+
+    // ========================================================================
+    // Batch 9 (D10): Arc/Rc struct-field receivers
+    // ========================================================================
+
+    #[test]
+    fn test_clone_of_arc_field_receiver_not_flagged() {
+        // D10: `self.state` is an `Arc<Inner>` field, so `self.state.clone()` in the
+        // loop is a refcount bump. The oracle recognises the field's Arc type even
+        // though the receiver is a field access, not a bare local binding.
+        let source = r#"
+            use std::sync::Arc;
+            struct Inner;
+            struct Service { state: Arc<Inner> }
+            impl Service {
+                fn run(&self) {
+                    for _ in 0..100 {
+                        let _c = self.state.clone();
+                    }
+                }
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "clone of an Arc field must not be flagged: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_clone_of_non_arc_field_receiver_still_flagged() {
+        // Contrast: `self.data` is a `Vec<u8>` field, so its clone is a real heap
+        // clone and must still fire.
+        let source = r#"
+            struct Service { data: Vec<u8> }
+            impl Service {
+                fn run(&self) {
+                    for _ in 0..10 {
+                        let _c = self.data.clone();
+                    }
+                }
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "clone of a Vec field must still fire"
+        );
+    }
+
+    #[test]
+    fn test_clone_of_ambiguous_field_name_still_flagged() {
+        // If one struct's `state` is Arc but another struct's `state` is an owned
+        // Vec, the field name is ambiguous; the oracle refuses to claim Arc, so the
+        // clone must still fire (conservative — no silent false negative).
+        let source = r#"
+            use std::sync::Arc;
+            struct A { state: Arc<u8> }
+            struct B { state: Vec<u8> }
+            impl B {
+                fn run(&self) {
+                    for _ in 0..10 {
+                        let _c = self.state.clone();
+                    }
+                }
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "an ambiguous field name must not suppress the clone"
         );
     }
 }
