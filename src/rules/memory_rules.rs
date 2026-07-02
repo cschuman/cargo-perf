@@ -31,6 +31,7 @@ impl Rule for CloneInLoopRule {
             ctx,
             diagnostics: Vec::new(),
             state: VisitorState::new(),
+            imports: ImportOracle::from_file(ctx.ast),
             arc_rc_names: HashSet::new(),
             copy_names: HashSet::new(),
         };
@@ -43,6 +44,10 @@ struct CloneInLoopVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     state: VisitorState,
+    /// In-file import/return-type oracle: lets a `let x = make_shared();` binding
+    /// be recognised as holding an Arc/Rc when `make_shared` is a same-file
+    /// Arc/Rc factory function (D9).
+    imports: ImportOracle,
     /// Names of bindings known to hold an `Arc`/`Rc` (function-scoped). Cloning
     /// these only bumps a reference count, so it must not be flagged.
     arc_rc_names: HashSet<String>,
@@ -179,6 +184,19 @@ impl CloneInLoopVisitor<'_> {
         false
     }
 
+    /// True if `expr` is a call to a same-file free function whose declared
+    /// return type is `Arc`/`Rc` (D9): `let cfg = make_shared();` yields an Arc
+    /// exactly as `Arc::new(..)` does, so cloning `cfg` in a loop is a refcount
+    /// bump, not a deep copy. Only bare single-segment calls are matched — an
+    /// associated call like `String::new()` is a two-segment path and never
+    /// misresolves to a free fn of the same leaf name. Associated Arc factories
+    /// (`Foo::shared()`) remain a known gap: the oracle records free fns only.
+    fn init_is_local_arc_factory(&self, expr: &Expr) -> bool {
+        let Expr::Call(call) = expr else { return false };
+        simple_receiver_name(&call.func)
+            .is_some_and(|name| self.imports.local_fn_return_mentions_arc_rc(&name))
+    }
+
     /// Emit the `clone-in-hot-loop` diagnostic at `span`. Shared by the
     /// method-call (`x.clone()`) and UFCS (`Clone::clone(&x)`) detection paths.
     fn emit_clone(&mut self, span: proc_macro2::Span) {
@@ -240,7 +258,10 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
                 // Arc/Rc handle both yield an Arc/Rc, so cloning the binding is a
                 // refcount bump. A bare Copy literal (`let x = 42u64;`) yields a
                 // Copy primitive with no explicit annotation.
-                if expr_is_arc_rc_ctor(&init.expr) || self.expr_is_arc_clone(&init.expr) {
+                if expr_is_arc_rc_ctor(&init.expr)
+                    || self.expr_is_arc_clone(&init.expr)
+                    || self.init_is_local_arc_factory(&init.expr)
+                {
                     is_arc = true;
                 } else if expr_is_copy_literal(&init.expr) {
                     is_copy = true;
@@ -1010,6 +1031,92 @@ mod tests {
             diagnostics.len(),
             1,
             "only f2's String clone should be flagged"
+        );
+    }
+
+    // ========================================================================
+    // Batch 9 (D9): Arc/Rc factory-function initializers
+    // ========================================================================
+
+    #[test]
+    fn test_clone_of_local_arc_factory_binding_not_flagged() {
+        // D9: `cfg` is initialized from a same-file `fn make_shared() -> Arc<Config>`.
+        // It holds an Arc, so cloning it in the loop is a refcount bump, not a heap
+        // clone — the oracle must recognise the factory return type and suppress it.
+        let source = r#"
+            use std::sync::Arc;
+            struct Config;
+            fn make_shared() -> Arc<Config> { Arc::new(Config) }
+            fn run() {
+                let cfg = make_shared();
+                for _ in 0..100 {
+                    let _c = cfg.clone();
+                }
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "clone of an Arc from a local factory fn must not be flagged: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_clone_of_local_rc_factory_binding_not_flagged() {
+        let source = r#"
+            use std::rc::Rc;
+            fn shared_node() -> Rc<Vec<u8>> { Rc::new(vec![]) }
+            fn run() {
+                let node = shared_node();
+                for _ in 0..10 {
+                    let _c = node.clone();
+                }
+            }
+        "#;
+        assert!(check_clone_rule(source).is_empty());
+    }
+
+    #[test]
+    fn test_clone_of_non_arc_factory_binding_still_flagged() {
+        // Contrast: `make_owned` returns a `Vec<u8>`, so `data.clone()` is a real
+        // heap clone and must still fire. Proves the factory suppression is gated on
+        // the return type, not merely on "initialized from any call".
+        let source = r#"
+            fn make_owned() -> Vec<u8> { vec![1, 2, 3] }
+            fn run() {
+                let data = make_owned();
+                for _ in 0..10 {
+                    let _c = data.clone();
+                }
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "clone of a Vec from a non-Arc factory must still fire"
+        );
+    }
+
+    #[test]
+    fn test_arc_factory_rebind_to_owned_reflags() {
+        // Shadowing must overwrite the factory-derived Arc record: after `let cfg =
+        // s.to_string();`, `cfg` is an owned String and its clone must fire again.
+        let source = r#"
+            use std::sync::Arc;
+            struct Config;
+            fn make_shared() -> Arc<Config> { Arc::new(Config) }
+            fn run(s: &str) {
+                let cfg = make_shared();
+                let cfg = s.to_string();
+                for _ in 0..10 {
+                    let _c = cfg.clone();
+                }
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "rebinding the factory Arc name to an owned String must re-flag its clone"
         );
     }
 }
