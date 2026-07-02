@@ -4,7 +4,7 @@ use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
 use std::collections::HashSet;
 use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ItemFn, Local, Pat, Type};
+use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ItemFn, Lit, Local, Pat, Type};
 
 /// Detects .clone() calls inside loops on heap-allocated types
 pub struct CloneInLoopRule;
@@ -128,6 +128,77 @@ fn binding_name(pat: &Pat) -> Option<String> {
     }
 }
 
+/// True if an expression is a numeric / bool / char / byte literal. Such a
+/// literal always has a `Copy` primitive type (some integer, float, `bool`,
+/// `char`, or `u8`) whether or not a suffix or annotation is present — so a
+/// binding initialized directly from one is `Copy`, and its `.clone()` is a
+/// no-op copy rather than a heap allocation.
+fn expr_is_copy_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Lit(el)
+            if matches!(
+                el.lit,
+                Lit::Int(_) | Lit::Float(_) | Lit::Bool(_) | Lit::Char(_) | Lit::Byte(_)
+            )
+    )
+}
+
+/// The identifier bound by a by-reference loop pattern `&x` (or `&mut x`), if
+/// any. `for &x in it` moves `x` out of a shared reference, which the borrow
+/// checker only accepts when the referent is `Copy`; so any name bound this way
+/// is guaranteed `Copy` and cloning it is a no-op.
+fn by_ref_binding_name(pat: &Pat) -> Option<String> {
+    if let Pat::Reference(r) = pat {
+        return binding_name(&r.pat);
+    }
+    None
+}
+
+/// Strip a leading `&`/`&mut` from `expr`, then return its bare single-segment
+/// name — e.g. `&s` -> `s`. Used to inspect the argument of `Clone::clone(&x)`.
+fn unref_simple_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Reference(r) => unref_simple_name(&r.expr),
+        _ => simple_receiver_name(expr),
+    }
+}
+
+impl CloneInLoopVisitor<'_> {
+    /// True if `expr` is `<name>.clone()` where `name` already holds an Arc/Rc.
+    /// The result is itself an Arc/Rc handle (a refcount bump), so a binding
+    /// initialized from it should be tracked as Arc/Rc too.
+    fn expr_is_arc_clone(&self, expr: &Expr) -> bool {
+        if let Expr::MethodCall(m) = expr {
+            if m.method == "clone" && m.args.is_empty() {
+                if let Some(name) = simple_receiver_name(&m.receiver) {
+                    return self.arc_rc_names.contains(&name);
+                }
+            }
+        }
+        false
+    }
+
+    /// Emit the `clone-in-hot-loop` diagnostic at `span`. Shared by the
+    /// method-call (`x.clone()`) and UFCS (`Clone::clone(&x)`) detection paths.
+    fn emit_clone(&mut self, span: proc_macro2::Span) {
+        self.diagnostics.push(Diagnostic {
+            rule_id: "clone-in-hot-loop",
+            severity: Severity::Warning,
+            message:
+                "`.clone()` called inside loop; consider borrowing or moving the clone outside"
+                    .to_string(),
+            file_path: self.ctx.file_path.to_path_buf(),
+            line: span.start().line,
+            column: span.start().column,
+            end_line: None,
+            end_column: None,
+            suggestion: Some("Use a reference or move the clone outside the loop".to_string()),
+            fix: None,
+        });
+    }
+}
+
 impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         if self.state.should_bail() {
@@ -156,16 +227,30 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
 
     fn visit_local(&mut self, node: &'ast Local) {
         if let Some(name) = binding_name(&node.pat) {
-            // `let x: i32 = ..` records a Copy binding.
+            let mut is_copy = false;
+            let mut is_arc = false;
+            // `let x: i32 = ..` records a Copy binding via its annotation.
             if let Pat::Type(pt) = &node.pat {
                 if type_is_copy_primitive(&pt.ty) {
-                    self.copy_names.insert(name.clone());
+                    is_copy = true;
                 }
             }
             if let Some(init) = &node.init {
-                if expr_is_arc_rc_ctor(&init.expr) {
-                    self.arc_rc_names.insert(name);
+                // An Arc/Rc ctor (`Arc::new(..)`) or a `.clone()` of an existing
+                // Arc/Rc handle both yield an Arc/Rc, so cloning the binding is a
+                // refcount bump. A bare Copy literal (`let x = 42u64;`) yields a
+                // Copy primitive with no explicit annotation.
+                if expr_is_arc_rc_ctor(&init.expr) || self.expr_is_arc_clone(&init.expr) {
+                    is_arc = true;
+                } else if expr_is_copy_literal(&init.expr) {
+                    is_copy = true;
                 }
+            }
+            if is_arc {
+                self.arc_rc_names.insert(name.clone());
+            }
+            if is_copy {
+                self.copy_names.insert(name);
             }
         }
         syn::visit::visit_local(self, node);
@@ -175,18 +260,34 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
         if self.state.should_bail() {
             return;
         }
-        // A `for x in <range>` variable is always an integer or char (Copy), so
-        // `x.clone()` in the body is a no-op copy, not a heap clone.
-        let range_var = matches!(&*node.expr, Expr::Range(_))
-            .then(|| binding_name(&node.pat))
-            .flatten();
-        if let Some(name) = &range_var {
+        // Collect loop-variable names that are guaranteed `Copy`:
+        //  - `for x in <range>`: `x` is always an integer or char.
+        //  - `for x in [copy-literals]`: `x` is the array element type, and an
+        //    array of Copy literals has a Copy element type.
+        //  - `for &x in it`: binding by value out of a shared reference only
+        //    compiles when the referent is Copy, so `x` is Copy.
+        // Cloning any of these in the body is a no-op copy, not a heap clone.
+        let mut copy_vars: Vec<String> = Vec::new();
+        let iter_yields_copy = match &*node.expr {
+            Expr::Range(_) => true,
+            Expr::Array(arr) => arr.elems.iter().all(expr_is_copy_literal),
+            _ => false,
+        };
+        if iter_yields_copy {
+            if let Some(name) = binding_name(&node.pat) {
+                copy_vars.push(name);
+            }
+        }
+        if let Some(name) = by_ref_binding_name(&node.pat) {
+            copy_vars.push(name);
+        }
+        for name in &copy_vars {
             self.copy_names.insert(name.clone());
         }
         self.state.enter_loop();
         syn::visit::visit_expr_for_loop(self, node);
         self.state.exit_loop();
-        if let Some(name) = &range_var {
+        for name in &copy_vars {
             self.copy_names.remove(name);
         }
     }
@@ -227,29 +328,37 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
             });
 
             if !skip {
-                let span = node.method.span();
-                let line = span.start().line;
-                let column = span.start().column;
-
-                self.diagnostics.push(Diagnostic {
-                    rule_id: "clone-in-hot-loop",
-                    severity: Severity::Warning,
-                    message:
-                        "`.clone()` called inside loop; consider borrowing or moving the clone outside"
-                            .to_string(),
-                    file_path: self.ctx.file_path.to_path_buf(),
-                    line,
-                    column,
-                    end_line: None,
-                    end_column: None,
-                    suggestion: Some(
-                        "Use a reference or move the clone outside the loop".to_string(),
-                    ),
-                    fix: None,
-                });
+                self.emit_clone(node.method.span());
             }
         }
         syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        // UFCS clone: `Clone::clone(&x)` / `<T as Clone>::clone(&x)` is the exact
+        // desugaring of `x.clone()` and allocates identically, but parses as a
+        // Call, not a MethodCall. Require both a trailing `clone` segment and a
+        // `Clone` segment so that `Arc::clone(..)` / `Rc::clone(..)` (which name
+        // the type, not the trait) are never matched here.
+        if self.state.in_loop() {
+            if let Expr::Path(ExprPath { path, .. }) = &*node.func {
+                let is_ufcs_clone = path.segments.last().is_some_and(|s| s.ident == "clone")
+                    && path.segments.iter().any(|s| s.ident == "Clone");
+                if is_ufcs_clone {
+                    // Suppress refcount / no-op clones by inspecting the single
+                    // argument (`Clone::clone(&x)`); an Arc/Rc or Copy `x` is cheap.
+                    let skip = node.args.first().and_then(unref_simple_name).is_some_and(|name| {
+                        self.arc_rc_names.contains(&name) || self.copy_names.contains(&name)
+                    });
+                    if !skip {
+                        if let Some(seg) = path.segments.last() {
+                            self.emit_clone(seg.ident.span());
+                        }
+                    }
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
     }
 }
 
@@ -444,6 +553,139 @@ mod tests {
             check_clone_rule(source).len(),
             1,
             "the heap clone must still be flagged, the Copy clone must not"
+        );
+    }
+
+    // ========================================================================
+    // Batch 2: Copy/Arc tracking-form coverage + UFCS clone (D11-D15)
+    // ========================================================================
+
+    #[test]
+    fn test_arc_handle_from_method_clone_not_flagged() {
+        // D11: `handle` is derived from an existing Arc via `.clone()` (a method
+        // call, not an `Arc::new`/`Arc::clone` ctor). It is still an Arc, so
+        // cloning it in the loop is only a refcount bump.
+        let source = r#"
+            use std::sync::Arc;
+            fn run(orig: Arc<String>) {
+                let handle = orig.clone();
+                let mut n = 0usize;
+                for _ in 0..50 {
+                    let c = handle.clone();
+                    n += c.len();
+                }
+                let _ = n;
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "Arc handle derived via .clone() must stay silent: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_copy_literal_suffix_local_clone_not_flagged() {
+        // D12: `let x = 42u64;` binds a Copy u64 by literal suffix (no explicit
+        // annotation). `x.clone()` is a no-op copy.
+        let source = r#"
+            fn run() -> u64 {
+                let x = 42u64;
+                let mut total = 0u64;
+                for _ in 0..1000 {
+                    total = total.wrapping_add(x.clone());
+                }
+                total
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "Copy local from literal suffix must stay silent: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_copy_array_literal_loop_var_clone_not_flagged() {
+        // D13: `b` is a Copy u8 loop variable from iterating an array literal.
+        let source = r#"
+            fn run() -> u32 {
+                let mut sum = 0u32;
+                for b in [10u8, 20, 30, 40] {
+                    sum += b.clone() as u32;
+                }
+                sum
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "Copy array-literal loop var must stay silent: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_copy_by_ref_pattern_loop_var_clone_not_flagged() {
+        // D14: `for &c in bytes.iter()` binds `c` by value; this only compiles
+        // when the element is Copy (you cannot move out of a shared reference),
+        // so `c.clone()` is guaranteed a no-op copy.
+        let source = r#"
+            fn checksum(bytes: &[u8]) -> u32 {
+                let mut acc = 0u32;
+                for &c in bytes.iter() {
+                    acc = acc.wrapping_add(c.clone() as u32);
+                }
+                acc
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "Copy by-ref-pattern loop var must stay silent: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_ufcs_heap_clone_in_loop_flagged() {
+        // D15: a genuine heap String clone written via UFCS `Clone::clone(&s)`
+        // has identical allocation cost to `s.clone()` and must fire.
+        let source = r#"
+            fn run(s: String) -> usize {
+                let mut total = 0;
+                for _ in 0..1000 {
+                    let owned = Clone::clone(&s);
+                    total += owned.len();
+                }
+                total
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "UFCS heap clone in loop must fire: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_ufcs_arc_clone_in_loop_not_flagged() {
+        // Guard the other direction: `Clone::clone(&arc)` where `arc` is an Arc
+        // is a refcount bump, not a heap clone, and must stay silent.
+        let source = r#"
+            use std::sync::Arc;
+            fn run(arc: Arc<String>) -> usize {
+                let mut total = 0;
+                for _ in 0..1000 {
+                    let owned = Clone::clone(&arc);
+                    total += owned.len();
+                }
+                total
+            }
+        "#;
+        assert!(
+            check_clone_rule(source).is_empty(),
+            "UFCS Arc refcount clone must stay silent: {:?}",
+            check_clone_rule(source)
         );
     }
 
