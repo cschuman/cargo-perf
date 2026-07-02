@@ -317,10 +317,15 @@ fn test_check_with_baseline_flag() {
 #[test]
 fn test_fix_dry_run() {
     let temp = TempDir::new().unwrap();
+    // Exercise the dry-run PREVIEW path, which is only reached when a diagnostic
+    // is fixable. A blocking `std::thread::sleep` in an async fn still carries an
+    // autofix (-> `tokio::time::sleep(..).await`). NOTE: the collect-then-iterate
+    // autofix this test used to rely on was intentionally removed (D18) because
+    // splicing out `.collect().iter()` can change the resulting type/borrow and
+    // produce non-compiling code, so that case no longer reaches this branch.
     let code = r#"
-fn test() {
-    let items: Vec<i32> = vec![1, 2, 3];
-    let _ = items.iter().collect::<Vec<_>>().iter().count();
+async fn slow() {
+    std::thread::sleep(std::time::Duration::from_secs(1));
 }
 "#;
     fs::write(temp.path().join("fix.rs"), code).unwrap();
@@ -333,7 +338,7 @@ fn test() {
         .success()
         .stdout(predicate::str::contains("Dry run"));
 
-    // File should be unchanged
+    // Dry run must leave the file byte-for-byte unchanged.
     let after = fs::read_to_string(temp.path().join("fix.rs")).unwrap();
     assert_eq!(code, after);
 }
