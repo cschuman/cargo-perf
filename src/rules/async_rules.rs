@@ -939,6 +939,33 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         self.state.exit_expr();
     }
 
+    fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
+        // An `async { .. }` block is an async context on its own, independent of
+        // the enclosing function. A blocking call inside
+        // `tokio::spawn(async { std::fs::read(..) })` written in a *sync* fn still
+        // blocks the runtime worker that polls it, so track it (D5). Reached only
+        // via `visit_expr`, which already manages recursion depth.
+        let was_async = self.in_async_fn;
+        self.in_async_fn = true;
+        syn::visit::visit_expr_async(self, node);
+        self.in_async_fn = was_async;
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        // A closure body is a fresh execution context. Sync closures are routinely
+        // handed to offloaders (`spawn_blocking`, `thread::spawn`, rayon) where
+        // blocking is the *correct* thing to do, so a sync closure body is NOT an
+        // async context — even inside an async fn — or every offloaded blocking
+        // call is a false positive (D5). An `async` closure keeps async context; a
+        // nested `async { .. }` re-enables it via `visit_expr_async`. A blocking
+        // call in a sync closure that is instead invoked inline is a deliberate
+        // known gap: the offload false positive is far more common than that miss.
+        let was_async = self.in_async_fn;
+        self.in_async_fn = node.asyncness.is_some();
+        syn::visit::visit_expr_closure(self, node);
+        self.in_async_fn = was_async;
+    }
+
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.in_async_fn {
             // Extract the function path
@@ -1662,5 +1689,84 @@ mod tests {
             "Fix should remove std sleep: {}",
             result
         );
+    }
+
+    // ========================================================================
+    // Batch 9 (D5): async blocks vs sync closures
+    // ========================================================================
+
+    #[test]
+    fn test_blocking_in_async_block_in_sync_fn_flagged() {
+        // D5: a blocking call inside an `async { .. }` block blocks the runtime
+        // worker that eventually polls it, even when the *enclosing* function is
+        // sync (the block is spawned onto the runtime). The async block, not the
+        // fn signature, defines the async context.
+        let source = r#"
+            fn spawn_work() {
+                tokio::spawn(async {
+                    let _ = std::fs::read_to_string("config.toml");
+                });
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in an async block must fire even in a sync fn"
+        );
+    }
+
+    #[test]
+    fn test_blocking_in_sync_closure_in_async_fn_not_flagged() {
+        // D5: a sync closure is a new execution context, commonly handed to an
+        // offloader (`spawn_blocking`, `thread::spawn`, rayon) where blocking is
+        // correct. We must not treat a sync closure body as async, even inside an
+        // async fn — otherwise every offloaded blocking call is a false positive.
+        let source = r#"
+            async fn process() {
+                let read_it = || {
+                    let _ = std::fs::read_to_string("config.toml");
+                };
+                let _ = read_it;
+            }
+        "#;
+        assert!(
+            check_blocking_code(source).is_empty(),
+            "blocking call in a sync closure must not fire: {:?}",
+            check_blocking_code(source)
+        );
+    }
+
+    #[test]
+    fn test_blocking_in_async_block_inside_sync_closure_flagged() {
+        // The sync-closure suppression must not swallow a nested `async { .. }`:
+        // async fn (async) -> sync closure (not async) -> async block (async again).
+        // The blocking call sits in the async block, so it must fire.
+        let source = r#"
+            async fn process() {
+                let make = || async {
+                    let _ = std::fs::read_to_string("config.toml");
+                };
+                let _ = make();
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in an async block nested in a sync closure must fire"
+        );
+    }
+
+    #[test]
+    fn test_blocking_in_sync_closure_in_sync_fn_not_flagged() {
+        // Regression guard: no async context anywhere -> silent.
+        let source = r#"
+            fn process() {
+                let read_it = || {
+                    let _ = std::fs::read_to_string("config.toml");
+                };
+                let _ = read_it;
+            }
+        "#;
+        assert!(check_blocking_code(source).is_empty());
     }
 }
