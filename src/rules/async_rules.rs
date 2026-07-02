@@ -3,7 +3,7 @@ use super::visitor::VisitorState;
 use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ItemFn, Member};
+use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ImplItemFn, ItemFn, Member};
 
 // ============================================================================
 // Unbounded Channel Detection
@@ -915,6 +915,21 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         self.state.exit_expr();
     }
 
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_expr();
+        // Async methods in impl blocks (inherent and trait impls) are async
+        // functions too; without tracking their asyncness, blocking calls in their
+        // bodies were systematically missed (D3, D4).
+        let was_async = self.in_async_fn;
+        self.in_async_fn = node.sig.asyncness.is_some();
+        syn::visit::visit_impl_item_fn(self, node);
+        self.in_async_fn = was_async;
+        self.state.exit_expr();
+    }
+
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
         if self.state.should_bail() {
             return;
@@ -983,6 +998,72 @@ mod tests {
         let config = Config::default();
         let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
         UnboundedSpawnRule.check(&ctx)
+    }
+
+    // ========================================================================
+    // Async methods in impl / trait-impl blocks (D3, D4)
+    // ========================================================================
+
+    #[test]
+    fn test_blocking_call_in_inherent_impl_async_method() {
+        // D3: a blocking `std::fs::read_to_string` inside an async method of an
+        // inherent impl must fire, just as it does in a free async fn.
+        let source = r#"
+            struct Worker;
+            impl Worker {
+                async fn load(&self) -> String {
+                    std::fs::read_to_string("config.toml").unwrap()
+                }
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in an inherent-impl async method must fire: {:?}",
+            check_blocking_code(source)
+        );
+    }
+
+    #[test]
+    fn test_blocking_call_in_trait_impl_async_method() {
+        // D4: a blocking `std::process::Command::..output()` inside an async method
+        // of a trait impl must fire.
+        let source = r#"
+            trait Runner {
+                async fn go(&self);
+            }
+            struct Shell;
+            impl Runner for Shell {
+                async fn go(&self) {
+                    let _ = std::process::Command::new("ls").arg("-la").output();
+                }
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in a trait-impl async method must fire: {:?}",
+            check_blocking_code(source)
+        );
+    }
+
+    #[test]
+    fn test_blocking_call_in_sync_impl_method_is_silent() {
+        // Guard: a blocking call in a NON-async impl method must stay silent — the
+        // impl-method handling must track asyncness, not flag every impl method.
+        let source = r#"
+            struct Worker;
+            impl Worker {
+                fn load(&self) -> String {
+                    std::fs::read_to_string("config.toml").unwrap()
+                }
+            }
+        "#;
+        assert!(
+            check_blocking_code(source).is_empty(),
+            "blocking call in a sync impl method must not fire: {:?}",
+            check_blocking_code(source)
+        );
     }
 
     // ========================================================================
