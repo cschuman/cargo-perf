@@ -50,20 +50,42 @@ struct VecNoCapacityVisitor<'a> {
 
 impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // Check for `let x = Vec::new()` pattern
-        if let Some(init) = &node.init {
-            if is_vec_new(&init.expr) {
-                if let syn::Pat::Ident(pat_ident) = &node.pat {
-                    // Store declaration location for better diagnostic placement
-                    let span = pat_ident.ident.span();
-                    let line = span.start().line;
-                    let column = span.start().column;
-                    self.vec_vars
-                        .insert(pat_ident.ident.to_string(), (line, column));
-                }
+        // A `let` binding classifies the name: `let v = Vec::new()` tracks it, but
+        // rebinding the same name to anything else (e.g. a shadow
+        // `let v = Vec::with_capacity(n)`) must CLEAR the stale entry, or the new
+        // binding inherits the old one's "needs capacity" status and is falsely flagged.
+        if let syn::Pat::Ident(pat_ident) = &node.pat {
+            let name = pat_ident.ident.to_string();
+            if node.init.as_ref().is_some_and(|init| is_vec_new(&init.expr)) {
+                let span = pat_ident.ident.span();
+                self.vec_vars
+                    .insert(name, (span.start().line, span.start().column));
+            } else {
+                self.vec_vars.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        // Reassignment (`v = Vec::with_capacity(n)`) is a rebind too: it replaces the
+        // backing allocation, so the prior `Vec::new()` classification no longer holds.
+        if let Expr::Path(ExprPath {
+            path, qself: None, ..
+        }) = &*node.left
+        {
+            if let Some(ident) = path.get_ident() {
+                let name = ident.to_string();
+                if is_vec_new(&node.right) {
+                    let span = ident.span();
+                    self.vec_vars
+                        .insert(name, (span.start().line, span.start().column));
+                } else {
+                    self.vec_vars.remove(&name);
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
@@ -200,20 +222,38 @@ struct HashMapNoCapacityVisitor<'a> {
 
 impl<'ast> Visit<'ast> for HashMapNoCapacityVisitor<'_> {
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // Check for `let x = HashMap::new()` pattern
-        if let Some(init) = &node.init {
-            if is_hashmap_new(&init.expr) {
-                if let syn::Pat::Ident(pat_ident) = &node.pat {
-                    // Store declaration location for better diagnostic placement
-                    let span = pat_ident.ident.span();
-                    let line = span.start().line;
-                    let column = span.start().column;
-                    self.map_vars
-                        .insert(pat_ident.ident.to_string(), (line, column));
-                }
+        // Track `let x = HashMap::new()`; a rebind to anything else clears the entry
+        // so a shadow `let x = HashMap::with_capacity(n)` is not falsely flagged.
+        if let syn::Pat::Ident(pat_ident) = &node.pat {
+            let name = pat_ident.ident.to_string();
+            if node.init.as_ref().is_some_and(|init| is_hashmap_new(&init.expr)) {
+                let span = pat_ident.ident.span();
+                self.map_vars
+                    .insert(name, (span.start().line, span.start().column));
+            } else {
+                self.map_vars.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if let Expr::Path(ExprPath {
+            path, qself: None, ..
+        }) = &*node.left
+        {
+            if let Some(ident) = path.get_ident() {
+                let name = ident.to_string();
+                if is_hashmap_new(&node.right) {
+                    let span = ident.span();
+                    self.map_vars
+                        .insert(name, (span.start().line, span.start().column));
+                } else {
+                    self.map_vars.remove(&name);
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
@@ -350,20 +390,38 @@ struct StringNoCapacityVisitor<'a> {
 
 impl<'ast> Visit<'ast> for StringNoCapacityVisitor<'_> {
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // Check for `let x = String::new()` pattern
-        if let Some(init) = &node.init {
-            if is_string_new(&init.expr) {
-                if let syn::Pat::Ident(pat_ident) = &node.pat {
-                    // Store declaration location for better diagnostic placement
-                    let span = pat_ident.ident.span();
-                    let line = span.start().line;
-                    let column = span.start().column;
-                    self.string_vars
-                        .insert(pat_ident.ident.to_string(), (line, column));
-                }
+        // Track `let x = String::new()`; a rebind to anything else clears the entry
+        // so a shadow `let x = String::with_capacity(n)` is not falsely flagged.
+        if let syn::Pat::Ident(pat_ident) = &node.pat {
+            let name = pat_ident.ident.to_string();
+            if node.init.as_ref().is_some_and(|init| is_string_new(&init.expr)) {
+                let span = pat_ident.ident.span();
+                self.string_vars
+                    .insert(name, (span.start().line, span.start().column));
+            } else {
+                self.string_vars.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if let Expr::Path(ExprPath {
+            path, qself: None, ..
+        }) = &*node.left
+        {
+            if let Some(ident) = path.get_ident() {
+                let name = ident.to_string();
+                if is_string_new(&node.right) {
+                    let span = ident.span();
+                    self.string_vars
+                        .insert(name, (span.start().line, span.start().column));
+                } else {
+                    self.string_vars.remove(&name);
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
@@ -938,11 +996,19 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast Local) {
-        if let Some(init) = &node.init {
-            if expr_is_lock_ctor(&init.expr) {
-                if let Some(name) = mutex_binding_name(&node.pat) {
-                    self.lock_names.insert(name);
-                }
+        // A lock ctor binding (`let g = Mutex::new(..)`) records the name; rebinding
+        // that name to a non-lock value (a shadow, or a sibling-scope reuse of the
+        // same name) must clear the stale entry so an ordinary `.read()`/`.lock()`
+        // domain method on the new binding is not mistaken for lock contention.
+        if let Some(name) = mutex_binding_name(&node.pat) {
+            if node
+                .init
+                .as_ref()
+                .is_some_and(|init| expr_is_lock_ctor(&init.expr))
+            {
+                self.lock_names.insert(name);
+            } else {
+                self.lock_names.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
@@ -1074,6 +1140,185 @@ mod tests {
         let config = Config::default();
         let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
         StringNoCapacityRule.check(&ctx)
+    }
+
+    // ========================================================================
+    // Batch 3: scope/shadow map hygiene (D25, D34, D36, D37, D38)
+    // ========================================================================
+
+    #[test]
+    fn test_vec_reassigned_to_with_capacity_not_flagged() {
+        // D36: `buf` is reassigned to `Vec::with_capacity(n)` before the loop, so
+        // every push targets the pre-sized vec. The stale `Vec::new()` binding
+        // must be cleared on reassignment.
+        let source = r#"
+            fn build(n: usize) -> Vec<u32> {
+                let mut buf = Vec::new();
+                buf = Vec::with_capacity(n);
+                for i in 0..n {
+                    buf.push(i as u32);
+                }
+                buf
+            }
+        "#;
+        assert!(
+            check_vec_capacity(source).is_empty(),
+            "reassigned-to-with_capacity vec must stay silent: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_vec_shadowed_by_with_capacity_not_flagged() {
+        // D37: the outer `v` = Vec::new() is pushed once outside any loop; a
+        // shadowed inner `v` = Vec::with_capacity is the one grown in the loop.
+        let source = r#"
+            fn render(items: &[String]) -> Vec<String> {
+                let mut v = Vec::new();
+                v.push(String::from("banner"));
+                drop(v);
+                {
+                    let mut v = Vec::with_capacity(items.len());
+                    for it in items {
+                        v.push(it.clone());
+                    }
+                    v
+                }
+            }
+        "#;
+        assert!(
+            check_vec_capacity(source).is_empty(),
+            "shadowed with_capacity vec must stay silent: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_vec_sibling_scope_name_collision_not_flagged() {
+        // D38: two same-named `out` bindings in sibling scopes; scope-1 pushes
+        // outside a loop, scope-2 uses with_capacity and grows in a loop.
+        let source = r#"
+            fn two_scopes(a: &[i32], b: &[i32]) -> (Vec<i32>, Vec<i32>) {
+                let first = {
+                    let mut out = Vec::new();
+                    out.push(a[0]);
+                    out
+                };
+                let second = {
+                    let mut out = Vec::with_capacity(b.len());
+                    for x in b {
+                        out.push(*x);
+                    }
+                    out
+                };
+                (first, second)
+            }
+        "#;
+        assert!(
+            check_vec_capacity(source).is_empty(),
+            "sibling-scope vec name collision must stay silent: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_vec_new_grown_in_loop_still_flagged() {
+        // Guard: the genuine antipattern (Vec::new grown in a loop) must still
+        // fire after the shadow/reassign hygiene changes.
+        let source = r#"
+            fn build(n: usize) -> Vec<u32> {
+                let mut buf = Vec::new();
+                for i in 0..n {
+                    buf.push(i as u32);
+                }
+                buf
+            }
+        "#;
+        assert_eq!(
+            check_vec_capacity(source).len(),
+            1,
+            "genuine Vec::new-in-loop must still fire: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_string_shadowed_by_with_capacity_not_flagged() {
+        // D34: `line` = String::new() is immediately shadowed by
+        // `line` = String::with_capacity(1024), which is the one grown in the loop.
+        let source = r#"
+            fn build_csv(rows: &[Vec<String>]) -> String {
+                let line = String::new();
+                let _ = &line;
+                let mut line = String::with_capacity(1024);
+                for cell in rows.iter().flatten() {
+                    line.push_str(cell);
+                    line.push(',');
+                }
+                line
+            }
+        "#;
+        assert!(
+            check_string_capacity(source).is_empty(),
+            "shadowed with_capacity string must stay silent: {:?}",
+            check_string_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_mutex_sibling_scope_name_collision_not_flagged() {
+        // D25: sibling blocks both bind `g`; the first is a real Mutex locked
+        // outside a loop, the second is a non-lock `Grid` whose nullary `read()`
+        // is called in a loop. The stale lock name must clear on rebind.
+        let source = r#"
+            use std::sync::Mutex;
+            struct Grid;
+            impl Grid {
+                fn read(&self) -> i32 { 7 }
+            }
+            fn phased() -> i32 {
+                let mut out = 0;
+                {
+                    let g = Mutex::new(0i32);
+                    out += *g.lock().unwrap();
+                }
+                {
+                    let g = Grid;
+                    for _ in 0..5 {
+                        out += g.read();
+                    }
+                }
+                out
+            }
+        "#;
+        assert!(
+            check_mutex_loop(source).is_empty(),
+            "sibling-scope mutex name collision must stay silent: {:?}",
+            check_mutex_loop(source)
+        );
+    }
+
+    #[test]
+    fn test_hashmap_shadowed_by_with_capacity_not_flagged() {
+        // Same defect class as D34/D37 applied to HashMap: a shadowed
+        // `HashMap::with_capacity` binding is the one inserted-to in the loop.
+        let source = r#"
+            use std::collections::HashMap;
+            fn build(n: usize) -> HashMap<u32, u32> {
+                let map = HashMap::new();
+                let _ = &map;
+                let mut map = HashMap::with_capacity(n);
+                for i in 0..n as u32 {
+                    map.insert(i, i);
+                }
+                map
+            }
+        "#;
+        assert!(
+            check_hashmap_capacity(source).is_empty(),
+            "shadowed with_capacity hashmap must stay silent: {:?}",
+            check_hashmap_capacity(source)
+        );
     }
 
     // String capacity tests

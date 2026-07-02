@@ -246,11 +246,19 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
                     is_copy = true;
                 }
             }
+            // Rebinding the same name (shadowing) must overwrite the prior
+            // classification: `let data = Arc::new(..)` then `let data = s.to_string()`
+            // leaves `data` an owned String, so a later `data.clone()` is a real heap
+            // clone and must not be suppressed by the stale Arc/Copy record.
             if is_arc {
                 self.arc_rc_names.insert(name.clone());
+            } else {
+                self.arc_rc_names.remove(&name);
             }
             if is_copy {
                 self.copy_names.insert(name);
+            } else {
+                self.copy_names.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
@@ -685,6 +693,62 @@ mod tests {
         assert!(
             check_clone_rule(source).is_empty(),
             "UFCS Arc refcount clone must stay silent: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    // ========================================================================
+    // Batch 3: clone-tracker shadow hygiene (D16, D17)
+    // ========================================================================
+
+    #[test]
+    fn test_arc_shadowed_by_string_clone_flagged() {
+        // D16: `data` starts as an Arc, then is shadowed by an owned String. The
+        // loop clones the String (a real heap clone) and must fire — the stale
+        // Arc entry must clear on rebind.
+        let source = r#"
+            use std::sync::Arc;
+            fn run(seed: &str) -> usize {
+                let data = Arc::new(vec![1u8, 2, 3]);
+                let _ = data.len();
+                let data = seed.to_string();
+                let mut total = 0;
+                for _ in 0..1000 {
+                    let owned = data.clone();
+                    total += owned.len();
+                }
+                total
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "String clone after Arc shadow must fire: {:?}",
+            check_clone_rule(source)
+        );
+    }
+
+    #[test]
+    fn test_copy_shadowed_by_string_clone_flagged() {
+        // D17: `key` is annotated Copy `u32`, then shadowed by an owned String.
+        // The heap clone of the String in the loop must fire.
+        let source = r#"
+            fn run(raw: &str) -> usize {
+                let key: u32 = 0;
+                let _ = key;
+                let key = raw.to_string();
+                let mut total = 0;
+                for _ in 0..1000 {
+                    let owned = key.clone();
+                    total += owned.len();
+                }
+                total
+            }
+        "#;
+        assert_eq!(
+            check_clone_rule(source).len(),
+            1,
+            "String clone after Copy shadow must fire: {:?}",
             check_clone_rule(source)
         );
     }
