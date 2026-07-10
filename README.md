@@ -17,10 +17,10 @@ async fn read_config() -> Config {
     toml::from_str(&data).unwrap()
 }
 
-// Deadlock — holds lock across yield point
-async fn update(mutex: &tokio::sync::Mutex<Data>) {
-    let guard = mutex.lock().await;
-    some_async_op().await; // guard still held across await
+// Deadlock risk — a *synchronous* guard held across an await point
+async fn update(mutex: &std::sync::Mutex<Data>) {
+    let guard = mutex.lock().unwrap();
+    some_async_op().await; // sync guard held across .await can deadlock the runtime
 }
 
 // 737x slower — regex compilation in hot loop
@@ -33,9 +33,22 @@ cargo-perf catches all of these.
 
 ## Installation
 
+Prebuilt binary (fastest — no compile), via [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
+
+```bash
+cargo binstall cargo-perf
+```
+
+Or build from source:
+
 ```bash
 cargo install cargo-perf
 ```
+
+Either way the binary installs as `cargo-perf`, so it runs as a cargo subcommand: `cargo perf`.
+
+**Adopting on an existing codebase?** Don't let pre-existing findings block you — see
+[Getting Started](docs/getting-started.md) for the baseline-and-ratchet workflow that fails CI only on *new* issues.
 
 ## Usage
 
@@ -55,8 +68,14 @@ cargo perf fix                      # Apply auto-fixes
 | Rule | What it catches |
 |------|-----------------|
 | `async-block-in-async` | `std::fs`, `thread::sleep`, blocking I/O in async functions |
-| `lock-across-await` | MutexGuard/RwLockGuard held across `.await` (deadlock risk) |
+| `lock-across-await` | **Synchronous** `MutexGuard`/`RwLockGuard` (std/parking_lot) held across `.await` — deadlock risk |
 | `n-plus-one-query` | Database queries inside loops (SQLx, Diesel, SeaORM) |
+
+> **Note on `lock-across-await`:** An *async* lock guard (`tokio::sync::Mutex`, `RwLock`) held across `.await` is
+> correct by design — that is what async locks are for. cargo-perf reports that case as a **Warning** (it serializes
+> tasks and can throttle throughput), not an error. Only *synchronous* guards held across `.await` are flagged as
+> errors, because those can deadlock the runtime. This is deliberately narrower than `clippy::await_holding_lock`,
+> which warns on every guard regardless of lock type.
 
 ### Warnings (Medium Confidence)
 
@@ -65,7 +84,7 @@ cargo perf fix                      # Apply auto-fixes
 | `unbounded-channel` | `mpsc::channel()`, `unbounded_channel()` | Memory exhaustion |
 | `unbounded-spawn` | `tokio::spawn` in loops | Resource exhaustion |
 | `regex-in-loop` | `Regex::new()` inside loops | 737x slower |
-| `clone-in-hot-loop` | `.clone()` on heap types in loops | 48x slower |
+| `clone-in-hot-loop` | `.clone()` in loops (excludes `Arc`/`Rc` refcount clones) | 48x slower |
 | `collect-then-iterate` | `.collect().iter()` | 2.3x slower |
 | `vec-no-capacity` | `Vec::new()` + push in loop | 1.8x slower |
 | `hashmap-no-capacity` | `HashMap::new()` + insert in loop | Repeated rehashing |
@@ -73,6 +92,34 @@ cargo perf fix                      # Apply auto-fixes
 | `format-in-loop` | `format!()` inside loops | Allocates each iteration |
 | `string-concat-loop` | String `+` in loops | Use `push_str()` |
 | `mutex-in-loop` | Lock acquired inside loop | Acquire once outside |
+
+## Accuracy
+
+A linter you can't trust gets muted or uninstalled. cargo-perf measures its own
+**precision** and **recall** against a hand-labeled corpus and enforces a floor
+on both in CI — per rule, not just in aggregate. Every one of the 14 rules is
+scored by both a positive fixture (it must fire when it should) and a negative
+fixture (it must stay silent when it shouldn't), so the scorecard can't be
+gamed by a rule that never runs. The negatives directly guard the false
+positives other linters are infamous for: `Arc::clone`/`Rc::clone` refcount
+bumps, `Copy` values cloned in loops, `io::Read`/`Write` and `AtomicUsize::load`
+in loops, custom `.output()`/`.load()` methods mistaken for blocking/DB calls,
+and async guards dropped before `.await`.
+
+The corpus was hardened by a repeatable **adversarial FP/FN hunt** — the last
+pass confirmed 38 defects and drove a 10-batch, test-first remediation — and the
+floor is now ratcheted to a perfect **1.00 / 1.00**: on this corpus a
+reintroduced false positive or a dropped true positive fails the build. Cases
+the tool honestly can't yet get right live in `tests/corpus/known_gaps/`
+(tracked, unscored) rather than dragging the number down quietly.
+
+```
+OVERALL   TP: 28   FP: 0   FN: 0   precision: 1.00   recall: 1.00   (80 fixtures, 14/14 rules)
+```
+
+Reproduce with `cargo test --test accuracy -- --nocapture`. Full methodology —
+the scorecard, the adversarial hunt, the `known_gaps/` policy, and the fuzzing
+and real-crate robustness scans — in [docs/accuracy.md](docs/accuracy.md).
 
 ## CI Integration
 
@@ -148,7 +195,7 @@ Real measurements (Apple M1 Pro, 1000 iterations):
 | `clone()` in loop | **48x slower** |
 | `collect().iter()` | **2.3x slower** |
 | Blocking in async | Blocks runtime thread |
-| Lock across await | **Deadlock** |
+| Sync lock across await | **Deadlock** |
 
 See [benchmarks/](benchmarks/) for methodology.
 

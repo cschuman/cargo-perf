@@ -131,6 +131,10 @@ where
             continue;
         }
 
+        // Explicit `warn`/`deny` config overrides the rule's intrinsic severity.
+        // Computed once per rule, outside the per-diagnostic loop.
+        let severity_override = config.severity_override(rule.id());
+
         // Catch panics in rule execution to prevent one bad rule from crashing analysis
         let rule_diagnostics =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rule.check(&ctx))) {
@@ -148,8 +152,11 @@ where
                 }
             };
 
-        // Filter out suppressed diagnostics
-        for diag in rule_diagnostics {
+        // Apply any configured severity override, then filter out suppressed diagnostics.
+        for mut diag in rule_diagnostics {
+            if let Some(severity) = severity_override {
+                diag.severity = severity;
+            }
             if !suppressions.is_suppressed(diag.rule_id, diag.line) {
                 diagnostics.push(diag);
             }
@@ -185,5 +192,73 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = read_file_secure(tmp.path());
         assert!(result.is_err());
+    }
+
+    // --- Config severity application (regression: severity was parsed but never applied) ---
+
+    use crate::config::RuleSeverity;
+    use crate::rules::{registry, Severity};
+
+    fn analyze_source_with_config(src: &str, config: &Config, rule_id: &str) -> Vec<Diagnostic> {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("t.rs");
+        std::fs::write(&file_path, src).unwrap();
+        let rule = registry::get_rule(rule_id).expect("rule exists");
+        analyze_file_with_rules(&file_path, config, std::iter::once(rule)).unwrap()
+    }
+
+    #[test]
+    fn test_config_deny_upgrades_diagnostic_severity() {
+        // clone-in-hot-loop defaults to Warning; deny must make emitted diagnostics Error.
+        let src = "fn f(v: &[String]) { for x in v { let _c = x.clone(); } }";
+        let mut config = Config::default();
+        config
+            .rules
+            .insert("clone-in-hot-loop".to_string(), RuleSeverity::Deny);
+        let diags = analyze_source_with_config(src, &config, "clone-in-hot-loop");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].severity,
+            Severity::Error,
+            "deny must upgrade the emitted diagnostic to Error"
+        );
+    }
+
+    #[test]
+    fn test_config_warn_downgrades_diagnostic_severity() {
+        // lock-across-await defaults to Error; warn must make emitted diagnostics Warning
+        // (a std::sync::Mutex guard held across .await is a genuine deadlock -> default Error).
+        let src = "async fn f(m: &std::sync::Mutex<i32>) { let g = m.lock().unwrap(); other().await; let _ = g; }";
+        let mut config = Config::default();
+        config
+            .rules
+            .insert("lock-across-await".to_string(), RuleSeverity::Warn);
+        let diags = analyze_source_with_config(src, &config, "lock-across-await");
+        assert!(!diags.is_empty(), "expected a lock-across-await diagnostic");
+        assert!(
+            diags.iter().all(|d| d.severity == Severity::Warning),
+            "warn must downgrade every emitted diagnostic to Warning"
+        );
+    }
+
+    #[test]
+    fn test_config_allow_disables_rule() {
+        let src = "fn f(v: &[String]) { for x in v { let _c = x.clone(); } }";
+        let mut config = Config::default();
+        config
+            .rules
+            .insert("clone-in-hot-loop".to_string(), RuleSeverity::Allow);
+        let diags = analyze_source_with_config(src, &config, "clone-in-hot-loop");
+        assert!(diags.is_empty(), "allow must disable the rule entirely");
+    }
+
+    #[test]
+    fn test_config_unset_preserves_intrinsic_severity() {
+        // With no override, each diagnostic keeps the severity the rule assigned.
+        let src = "fn f(v: &[String]) { for x in v { let _c = x.clone(); } }";
+        let config = Config::default();
+        let diags = analyze_source_with_config(src, &config, "clone-in-hot-loop");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Severity::Warning);
     }
 }

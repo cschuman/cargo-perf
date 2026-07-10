@@ -59,7 +59,12 @@ impl Rule for NPlusOneQueryRule {
             state: VisitorState::new(),
         };
         visitor.visit_file(ctx.ast);
-        visitor.diagnostics
+        // A single query statement (e.g. `query(..).bind(..).fetch_one(..)`) can
+        // match more than one detector on the same line; collapse to one finding.
+        let mut diagnostics = visitor.diagnostics;
+        diagnostics.sort_by_key(|d| (d.line, d.column));
+        diagnostics.dedup_by_key(|d| d.line);
+        diagnostics
     }
 }
 
@@ -107,6 +112,22 @@ const SEAORM_AMBIGUOUS_METHODS: &[&str] = &["one", "all", "find"];
 
 /// Entity operations that need receiver validation
 const AMBIGUOUS_OPERATIONS: &[&str] = &["insert", "update", "delete", "save", "execute"];
+
+/// Method names distinctive enough to an ORM that an ORM import in the file is
+/// sufficient corroboration. Deliberately excludes ubiquitous names like `load`
+/// (atomics), `first`/`find`/`one`/`all` (iterators), and `insert` (collections).
+const ORM_SPECIFIC_METHODS: &[&str] = &[
+    "fetch_one",
+    "fetch_all",
+    "fetch_optional",
+    "fetch_many",
+    "get_result",
+    "get_results",
+    "find_by_id",
+    "find_related",
+    "find_with_related",
+    "find_also_related",
+];
 
 /// Maximum recursion depth for looks_like_db_operation to prevent stack overflow
 const MAX_DB_CHECK_DEPTH: usize = 64;
@@ -184,72 +205,57 @@ impl NPlusOneVisitor<'_> {
         receiver: &Expr,
         args: &Punctuated<Expr, Token![,]>,
     ) {
-        // Check unambiguous methods first - always flag these (no false positives)
+        // Every N+1 detection requires corroboration that this really is a
+        // database call. A bare method name is far too ambiguous: `load` is an
+        // atomic read, `first`/`find`/`one`/`all` are iterator methods, `insert`
+        // is a HashMap method. We corroborate via:
+        //   * a receiver that looks like a query-builder chain, or
+        //   * a database connection / pool passed as an argument, or
+        //   * for rare ORM-specific method names, an ORM import in the file.
+        let strong = Self::looks_like_db_operation(receiver, 0, self.orm_imported())
+            || Self::has_db_connection_arg(args);
+        let corroborated =
+            strong || (ORM_SPECIFIC_METHODS.contains(&method_name) && self.orm_imported());
+        if !corroborated {
+            return;
+        }
+
         if SQLX_FETCH_METHODS.contains(&method_name) {
             self.report_diagnostic(
                 span,
                 "Consider using WHERE ... IN or ANY() for batch fetching.",
                 method_name,
             );
-            return;
-        }
-
-        if DIESEL_UNAMBIGUOUS_METHODS.contains(&method_name) {
+        } else if DIESEL_UNAMBIGUOUS_METHODS.contains(&method_name)
+            || DIESEL_AMBIGUOUS_METHODS.contains(&method_name)
+        {
             self.report_diagnostic(
                 span,
                 "Consider using .filter(column.eq_any(&ids)) for batch operations.",
                 method_name,
             );
-            return;
-        }
-
-        if SEAORM_UNAMBIGUOUS_METHODS.contains(&method_name) {
+        } else if SEAORM_UNAMBIGUOUS_METHODS.contains(&method_name)
+            || SEAORM_AMBIGUOUS_METHODS.contains(&method_name)
+        {
             self.report_diagnostic(
                 span,
                 "Consider using Entity::find().filter(Column::Id.is_in(ids)) for batch fetching.",
                 method_name,
             );
-            return;
-        }
-
-        // For ambiguous methods, require validation to prevent false positives
-        // (e.g., Vec::first(), HashMap::insert(), Iterator::find())
-        // We check the receiver OR if args look like DB connection
-        let receiver_looks_like_db = Self::looks_like_db_operation(receiver, 0);
-        let args_look_like_db = Self::has_db_connection_arg(args);
-
-        if !receiver_looks_like_db && !args_look_like_db {
-            return;
-        }
-
-        // Check ambiguous Diesel methods
-        if DIESEL_AMBIGUOUS_METHODS.contains(&method_name) {
-            self.report_diagnostic(
-                span,
-                "Consider using .filter(column.eq_any(&ids)) for batch operations.",
-                method_name,
-            );
-            return;
-        }
-
-        // Check ambiguous SeaORM methods
-        if SEAORM_AMBIGUOUS_METHODS.contains(&method_name) {
-            self.report_diagnostic(
-                span,
-                "Consider using Entity::find().filter(Column::Id.is_in(ids)) for batch fetching.",
-                method_name,
-            );
-            return;
-        }
-
-        // Check ambiguous operations (insert, update, delete, save)
-        if AMBIGUOUS_OPERATIONS.contains(&method_name) {
+        } else if AMBIGUOUS_OPERATIONS.contains(&method_name) {
             self.report_diagnostic(
                 span,
                 "Consider using Entity::insert_many() or batch operations.",
                 method_name,
             );
         }
+    }
+
+    /// Whether the file imports a known ORM crate. Used only as a weak
+    /// corroboration signal for rare, ORM-specific method names.
+    fn orm_imported(&self) -> bool {
+        let src = self.ctx.source;
+        src.contains("use diesel") || src.contains("use sqlx") || src.contains("use sea_orm")
     }
 
     /// Check if any argument looks like a database connection.
@@ -267,32 +273,28 @@ impl NPlusOneVisitor<'_> {
             "transaction",
         ];
 
-        for arg in args.iter() {
-            // Check path arguments: db, pool, conn, etc.
-            if let Expr::Path(path) = arg {
-                if let Some(ident) = path.path.get_ident() {
-                    let name = ident.to_string().to_lowercase();
-                    if DB_CONNECTION_NAMES
-                        .iter()
-                        .any(|&db_name| name.contains(db_name))
-                    {
-                        return true;
-                    }
-                }
-            }
-            // Check reference arguments: &db, &pool, &conn, etc.
-            if let Expr::Reference(ref_expr) = arg {
-                if let Expr::Path(path) = &*ref_expr.expr {
-                    if let Some(ident) = path.path.get_ident() {
-                        let name = ident.to_string().to_lowercase();
-                        if DB_CONNECTION_NAMES
-                            .iter()
-                            .any(|&db_name| name.contains(db_name))
-                        {
-                            return true;
-                        }
-                    }
-                }
+        // Only the FIRST argument is inspected. Across Diesel/SQLx/SeaORM the
+        // executor is conventionally the sole/first argument — `.load(conn)`,
+        // `.execute(conn)`, `.fetch_one(pool)`, `.one(db)`, `.insert(db)`. A
+        // connection-shaped name in a later position is not a query executor: e.g.
+        // `map.insert(k, &conn)` puts a local named `conn` in the *value* slot of a
+        // HashMap insert and must not corroborate an N+1 query (D26).
+        let Some(arg) = args.first() else {
+            return false;
+        };
+
+        // Unwrap a leading `&`/`&mut` so `&conn` / `&mut conn` are handled like `conn`.
+        let inner = match arg {
+            Expr::Reference(ref_expr) => &*ref_expr.expr,
+            other => other,
+        };
+
+        if let Expr::Path(path) = inner {
+            if let Some(ident) = path.path.get_ident() {
+                let name = ident.to_string().to_lowercase();
+                // EXACT equality (not substring): a substring match let `&ctx`
+                // ("ctx".contains("tx")) falsely corroborate ordinary calls (D29).
+                return DB_CONNECTION_NAMES.iter().any(|&db_name| name == db_name);
             }
         }
         false
@@ -305,7 +307,14 @@ impl NPlusOneVisitor<'_> {
     /// - A function call to a database function (sqlx::query, etc.)
     ///
     /// The `depth` parameter prevents stack overflow on deeply nested expressions.
-    fn looks_like_db_operation(receiver: &Expr, depth: usize) -> bool {
+    ///
+    /// `orm` is true when the file imports a known ORM crate. Query-builder method
+    /// names that collide with ubiquitous stdlib methods (`filter`, `select`,
+    /// `into`, `find`, `from`, `execute`, `fetch`, `table`) only corroborate a DB
+    /// operation when an ORM is actually imported — without that gate, a plain
+    /// `Iterator::filter`, `Into::into`, or a `.select(..)` on any UI type would
+    /// masquerade as a query builder (D27, D28, D32).
+    fn looks_like_db_operation(receiver: &Expr, depth: usize, orm: bool) -> bool {
         // Prevent stack overflow on deeply nested expressions
         if depth > MAX_DB_CHECK_DEPTH {
             return false;
@@ -315,27 +324,24 @@ impl NPlusOneVisitor<'_> {
             // Check method chains: e.g., query(...).bind(...).fetch_one()
             Expr::MethodCall(method_call) => {
                 let method_name = method_call.method.to_string();
-                // Database query builder methods
-                const DB_BUILDER_METHODS: &[&str] = &[
-                    "query",
-                    "query_as",
-                    "query_scalar",
-                    "find",
-                    "find_by_id",
-                    "filter",
-                    "select",
-                    "bind",
-                    "execute",
-                    "fetch",
-                    "table",
-                    "from",
-                    "into",
+                // Distinctive builder methods: ORM-specific enough to trust on name
+                // alone (they do not collide with common stdlib methods).
+                const DISTINCTIVE_BUILDER_METHODS: &[&str] =
+                    &["query", "query_as", "query_scalar", "find_by_id", "bind"];
+                // Ambiguous builder methods: real query-builder verbs that are also
+                // ubiquitous stdlib method names. Only a signal when an ORM is
+                // imported in the file.
+                const AMBIGUOUS_BUILDER_METHODS: &[&str] = &[
+                    "find", "filter", "select", "execute", "fetch", "table", "from", "into",
                 ];
-                if DB_BUILDER_METHODS.contains(&method_name.as_str()) {
+                if DISTINCTIVE_BUILDER_METHODS.contains(&method_name.as_str()) {
+                    return true;
+                }
+                if orm && AMBIGUOUS_BUILDER_METHODS.contains(&method_name.as_str()) {
                     return true;
                 }
                 // Recursively check the receiver chain
-                Self::looks_like_db_operation(&method_call.receiver, depth + 1)
+                Self::looks_like_db_operation(&method_call.receiver, depth + 1, orm)
             }
             // Check function calls: e.g., sqlx::query("..."), User::find_by_id(id)
             Expr::Call(call) => {
@@ -377,23 +383,19 @@ impl NPlusOneVisitor<'_> {
                     false
                 }
             }
-            // Check paths that look like database types: e.g., Entity::find_by_id
-            Expr::Path(path) => {
-                let path_str = path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|s| s.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                path_str.contains("Entity")
-                    || path_str.contains("users")
-                    || path_str.contains("table")
-            }
+            // A bare path receiver (`users`, `table`, ...) is NOT evidence of a
+            // database operation: those are ordinary variable/module names. The old
+            // `contains("users"|"table"|"Entity")` substring match flagged a local
+            // `Vec` named `users` or a dispatch struct named `table` (D30, D31).
+            // Real ORM lineage is corroborated through Call paths (`Entity::find`,
+            // `diesel::..`) or a connection argument instead.
+            Expr::Path(_) => false,
             // Check await expressions (common in async db code)
-            Expr::Await(await_expr) => Self::looks_like_db_operation(&await_expr.base, depth + 1),
+            Expr::Await(await_expr) => {
+                Self::looks_like_db_operation(&await_expr.base, depth + 1, orm)
+            }
             // Check try expressions (?)
-            Expr::Try(try_expr) => Self::looks_like_db_operation(&try_expr.expr, depth + 1),
+            Expr::Try(try_expr) => Self::looks_like_db_operation(&try_expr.expr, depth + 1, orm),
             // For other expressions, be conservative
             _ => false,
         }
@@ -547,6 +549,238 @@ mod tests {
         let diagnostics = check_code(source);
         assert!(!diagnostics.is_empty());
         assert!(diagnostics.iter().any(|d| d.message.contains("fetch_one")));
+    }
+
+    // ------------------------------------------------------------------
+    // Corroboration gating (false-positive guards)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_atomic_load_in_loop_is_not_n_plus_one() {
+        let source = r#"
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            fn count(c: &AtomicUsize) -> usize {
+                let mut n = 0;
+                for _ in 0..10 { n += c.load(Ordering::Relaxed); }
+                n
+            }
+        "#;
+        assert!(check_code(source).is_empty(), "atomic load flagged as N+1");
+    }
+
+    #[test]
+    fn test_custom_load_without_connection_is_silent() {
+        let source = r#"
+            struct Cache;
+            impl Cache { fn load(&self, _k: u32) -> u32 { 0 } }
+            fn warm(cache: &Cache) {
+                for k in 0..5 { let _ = cache.load(k); }
+            }
+        "#;
+        assert!(check_code(source).is_empty(), "custom load flagged as N+1");
+    }
+
+    #[test]
+    fn test_diesel_load_with_connection_arg_still_flags() {
+        // A `.load(&mut conn)` connection argument corroborates the DB call.
+        let source = r#"
+            fn bad(conn: &mut PgConnection, ids: Vec<i32>) {
+                for id in ids {
+                    let _ = users::table.filter(users::id.eq(id)).load::<User>(conn);
+                }
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert!(diagnostics.iter().any(|d| d.message.contains("load")));
+    }
+
+    #[test]
+    fn test_context_variable_does_not_corroborate() {
+        // `context` must not match the `tx` connection name via substring.
+        let source = r#"
+            struct Renderer;
+            impl Renderer { fn first(&self) -> u32 { 0 } }
+            fn draw(context: u32, r: &Renderer) {
+                for _ in 0..3 { let _ = r.first(); let _ = context; }
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "context matched tx substring"
+        );
+    }
+
+    // --- N+1 corroboration FPs from the adversarial hunt (D26-D32) ---
+
+    #[test]
+    fn test_hashmap_insert_ref_named_conn_not_flagged() {
+        // D26: a local `u32` named `conn` passed as `&conn` to a plain HashMap
+        // insert. The reference-arg corroboration must be exact, not a substring.
+        let source = r#"
+            use std::collections::HashMap;
+            fn build(pairs: &[(u32, u32)]) -> HashMap<u32, u32> {
+                let mut map = HashMap::with_capacity(pairs.len());
+                let conn = 7u32;
+                for &(k, v) in pairs {
+                    map.insert(k, &conn);
+                    let _ = map.get(&k);
+                    let _ = v;
+                }
+                map
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "HashMap insert with &conn arg must not be N+1: {:?}",
+            check_code(source)
+        );
+    }
+
+    #[test]
+    fn test_iterator_filter_collect_first_not_flagged() {
+        // D27: a pure iterator pipeline `.filter(..).collect().first()`. `filter`
+        // must not corroborate a DB op with no ORM imported.
+        let source = r#"
+            fn pick_evens(rows: &[Vec<i32>]) -> Vec<i32> {
+                let mut out = Vec::with_capacity(rows.len());
+                for row in rows {
+                    if let Some(&v) = row.iter().filter(|n| *n % 2 == 0).collect::<Vec<_>>().first() {
+                        out.push(v);
+                    }
+                }
+                out
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "iterator filter/collect/first must not be N+1: {:?}",
+            check_code(source)
+        );
+    }
+
+    #[test]
+    fn test_ui_select_first_not_flagged() {
+        // D28: `Grid::select(col)` returns a Vec; `.first()` on it is a slice method.
+        // `select` must not corroborate a DB op with no ORM imported.
+        let source = r#"
+            struct Grid;
+            impl Grid {
+                fn select(&self, _col: usize) -> Vec<i32> { vec![1, 2, 3] }
+            }
+            fn header_values(grids: &[Grid]) -> Vec<i32> {
+                let mut headers = Vec::with_capacity(grids.len());
+                for g in grids {
+                    if let Some(&h) = g.select(0).first() {
+                        headers.push(h);
+                    }
+                }
+                headers
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "UI select().first() must not be N+1: {:?}",
+            check_code(source)
+        );
+    }
+
+    #[test]
+    fn test_validator_all_ref_ctx_not_flagged() {
+        // D29: `v.all(&ctx)` on a validator; `ctx` contains the substring "tx" but is
+        // not a connection. Reference-arg corroboration must be exact.
+        let source = r#"
+            struct Validator;
+            impl Validator {
+                fn all(&self, _ctx: &Ctx) -> bool { true }
+            }
+            struct Ctx;
+            fn validate(items: &[Validator]) -> usize {
+                let ctx = Ctx;
+                let mut ok = 0;
+                for v in items {
+                    if v.all(&ctx) {
+                        ok += 1;
+                    }
+                }
+                ok
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "validator all(&ctx) must not be N+1: {:?}",
+            check_code(source)
+        );
+    }
+
+    #[test]
+    fn test_local_vec_named_users_first_not_flagged() {
+        // D30: a local Vec named `users`; `users.first()` is a slice method. A path
+        // receiver name must not corroborate a DB op by substring.
+        let source = r#"
+            struct User { name: String }
+            fn greet(groups: &[Vec<User>]) {
+                for group in groups {
+                    let users = group;
+                    if let Some(u) = users.first() {
+                        println!("{}", u.name);
+                    }
+                }
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "local Vec named users must not be N+1: {:?}",
+            check_code(source)
+        );
+    }
+
+    #[test]
+    fn test_dispatch_table_execute_not_flagged() {
+        // D31: a dispatch struct in a local named `table`; `table.execute(cmd)` is a
+        // plain call. The path receiver "table" must not corroborate a DB op.
+        let source = r#"
+            struct Command;
+            struct DispatchTable;
+            impl DispatchTable {
+                fn execute(&self, _cmd: &Command) {}
+            }
+            fn run(cmds: &[Command]) {
+                let table = DispatchTable;
+                for cmd in cmds {
+                    table.execute(cmd);
+                }
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "dispatch table.execute must not be N+1: {:?}",
+            check_code(source)
+        );
+    }
+
+    #[test]
+    fn test_fluent_into_execute_not_flagged() {
+        // D32: `c.into_runner().into().execute()` — `into` is the ubiquitous stdlib
+        // conversion and must not corroborate a DB op with no ORM imported.
+        let source = r#"
+            struct Cmd;
+            impl Cmd {
+                fn into_runner(self) -> Cmd { self }
+                fn execute(self) -> u32 { 0 }
+            }
+            fn run(items: Vec<Cmd>) -> u32 {
+                let mut acc = 0;
+                for c in items {
+                    acc += c.into_runner().into().execute();
+                }
+                acc
+            }
+        "#;
+        assert!(
+            check_code(source).is_empty(),
+            "fluent into().execute() must not be N+1: {:?}",
+            check_code(source)
+        );
     }
 
     #[test]

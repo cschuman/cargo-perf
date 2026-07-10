@@ -1,9 +1,8 @@
 use super::visitor::VisitorState;
-use super::{Diagnostic, Fix, Replacement, Rule, Severity};
+use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
-use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::ExprMethodCall;
+use syn::{Expr, ExprMethodCall};
 
 /// Detects .collect() immediately followed by iteration
 pub struct CollectThenIterateRule;
@@ -42,24 +41,60 @@ struct CollectThenIterateVisitor<'a> {
     state: VisitorState,
 }
 
-/// Get the byte range to remove for a collect-then-iterate pattern.
-///
-/// Given `original.collect().iter()`, returns the byte range of `.collect().iter()`
-/// (from after `original` to end of `.iter()`).
-fn get_collect_iter_removal_range(
-    ctx: &AnalysisContext,
-    collect_call: &ExprMethodCall,
-    iter_call: &ExprMethodCall,
-) -> Option<(usize, usize)> {
-    // Get the span of the receiver of .collect() (the original iterator chain)
-    let original_span = collect_call.receiver.span();
-    let original_end = ctx.span_to_byte_range(original_span)?.1;
+/// Iterator-producing method names. If one appears in the receiver chain of a
+/// `.collect()`, that `collect` is almost certainly `Iterator::collect` rather
+/// than a domain method that merely shares the name.
+const ITERATOR_ADAPTERS: &[&str] = &[
+    "iter",
+    "into_iter",
+    "iter_mut",
+    "map",
+    "filter",
+    "filter_map",
+    "flat_map",
+    "flatten",
+    "chars",
+    "bytes",
+    "enumerate",
+    "zip",
+    "chain",
+    "cloned",
+    "copied",
+    "rev",
+    "take",
+    "take_while",
+    "skip",
+    "skip_while",
+    "step_by",
+    "scan",
+    "peekable",
+    "keys",
+    "values",
+    "drain",
+    "lines",
+    "split",
+    "split_whitespace",
+];
 
-    // Get the span of the entire .iter() call
-    let iter_span = iter_call.span();
-    let iter_end = ctx.span_to_byte_range(iter_span)?.1;
-
-    Some((original_end, iter_end))
+/// True if `collect_call` carries a syntactic signal that it is
+/// `Iterator::collect` and not a domain method coincidentally named `collect`:
+/// either a turbofish (`collect::<Vec<_>>()`) or a recognized iterator adapter
+/// somewhere in its receiver chain. Without such a signal we stay silent — a
+/// syn-only linter cannot tell `query_builder.collect()` (a domain call) from
+/// `it.map(..).collect()` (a real materialization), and firing on the former is
+/// the D18 false positive.
+fn collect_is_iterator(collect_call: &ExprMethodCall) -> bool {
+    if collect_call.turbofish.is_some() {
+        return true;
+    }
+    let mut receiver = &*collect_call.receiver;
+    while let Expr::MethodCall(inner) = receiver {
+        if ITERATOR_ADAPTERS.contains(&inner.method.to_string().as_str()) {
+            return true;
+        }
+        receiver = &inner.receiver;
+    }
+    false
 }
 
 impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
@@ -79,24 +114,14 @@ impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
         if method_name == "iter" || method_name == "into_iter" {
             // Check if the receiver is a .collect() call
             if let syn::Expr::MethodCall(inner) = &*node.receiver {
-                if inner.method == "collect" {
+                // Only fire when the `.collect()` is provably `Iterator::collect`
+                // (turbofish or an upstream iterator adapter). A domain method
+                // named `collect` on a non-iterator — e.g. `QueryBuilder::collect`
+                // returning a struct with its own `.iter()` — must stay silent (D18).
+                if inner.method == "collect" && collect_is_iterator(inner) {
                     let span = node.method.span();
                     let line = span.start().line;
                     let column = span.start().column;
-
-                    // Try to generate a fix
-                    let fix = get_collect_iter_removal_range(self.ctx, inner, node).map(
-                        |(start, end)| Fix {
-                            description: "Remove .collect().iter() and continue iterator chain"
-                                .to_string(),
-                            replacements: vec![Replacement {
-                                file_path: self.ctx.file_path.to_path_buf(),
-                                start_byte: start,
-                                end_byte: end,
-                                new_text: String::new(),
-                            }],
-                        },
-                    );
 
                     self.diagnostics.push(Diagnostic {
                         rule_id: "collect-then-iterate",
@@ -108,7 +133,10 @@ impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
                         end_line: None,
                         end_column: None,
                         suggestion: Some("Remove `.collect::<Vec<_>>().iter()` and continue the iterator chain".to_string()),
-                        fix,
+                        // No autofix: deleting the `.collect().iter()` byte range can
+                        // change the resulting type/borrow and produce non-compiling
+                        // code even on true positives. Advisory-only (D18).
+                        fix: None,
                     });
                 }
             }
@@ -239,56 +267,64 @@ mod tests {
     }
 
     #[test]
-    fn test_fix_removes_collect_iter() {
+    fn test_no_autofix_emitted_for_collect_iter() {
+        // D18: the byte-splice autofix was removed — deleting `.collect().iter()`
+        // can change the resulting type/borrow and break compilation. The
+        // diagnostic still fires (turbofish signals a real Iterator::collect) but
+        // is advisory-only.
         let source = r#"fn test() {
     let _: i32 = vec![1, 2, 3].iter().collect::<Vec<_>>().iter().sum();
 }"#;
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
-
-        // Check that fix is generated
-        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix");
-        assert_eq!(fix.replacements.len(), 1);
-
-        // Apply the fix manually to verify it works
-        let replacement = &fix.replacements[0];
-        let mut result = source.to_string();
-        result.replace_range(
-            replacement.start_byte..replacement.end_byte,
-            &replacement.new_text,
-        );
-
-        // The result should be valid Rust without .collect().iter()
         assert!(
-            result.contains(".iter().sum()"),
-            "Fix should preserve the iterator chain: {}",
-            result
-        );
-        assert!(
-            !result.contains(".collect::<Vec<_>>().iter()"),
-            "Fix should remove .collect().iter(): {}",
-            result
+            diagnostics[0].fix.is_none(),
+            "autofix must be dropped (advisory-only)"
         );
     }
 
     #[test]
-    fn test_fix_handles_into_iter() {
+    fn test_no_autofix_emitted_for_collect_into_iter() {
         let source = r#"fn f() { vec![1].iter().collect::<Vec<_>>().into_iter().sum::<i32>(); }"#;
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].fix.is_none(), "autofix must be dropped");
+    }
 
-        let fix = diagnostics[0].fix.as_ref().expect("Should have a fix");
-        let replacement = &fix.replacements[0];
-        let mut result = source.to_string();
-        result.replace_range(
-            replacement.start_byte..replacement.end_byte,
-            &replacement.new_text,
-        );
-
+    #[test]
+    fn test_no_detection_for_domain_collect_without_iterator_signal() {
+        // D18: `QueryBuilder::collect()` is a domain method returning a `ResultSet`
+        // with its own `.iter()`; there is no iterator materialization to fuse and
+        // no turbofish / upstream adapter, so it must stay silent.
+        let source = r#"
+            struct QueryBuilder;
+            struct ResultSet { rows: Vec<i32> }
+            impl QueryBuilder {
+                fn collect(&self) -> ResultSet { ResultSet { rows: vec![1, 2, 3] } }
+            }
+            impl ResultSet {
+                fn iter(&self) -> std::slice::Iter<'_, i32> { self.rows.iter() }
+            }
+            fn run(q: &QueryBuilder) -> i32 {
+                q.collect().iter().copied().sum()
+            }
+        "#;
         assert!(
-            !result.contains(".collect::<Vec<_>>().into_iter()"),
-            "Fix should remove .collect().into_iter(): {}",
-            result
+            check_code(source).is_empty(),
+            "domain collect() with no iterator signal must not fire"
         );
+    }
+
+    #[test]
+    fn test_detects_collect_iter_via_upstream_adapter_without_turbofish() {
+        // No turbofish, but the `.collect()` receiver chain contains real iterator
+        // adapters (`iter`, `map`), so it is genuinely `Iterator::collect`.
+        let source = r#"
+            fn test(items: &[i32]) -> i32 {
+                items.iter().map(|x| x + 1).collect().iter().copied().sum()
+            }
+        "#;
+        let diagnostics = check_code(source);
+        assert_eq!(diagnostics.len(), 1);
     }
 }

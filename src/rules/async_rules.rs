@@ -1,8 +1,9 @@
+use super::resolve::{is_std_root, ImportOracle};
 use super::visitor::VisitorState;
 use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ItemFn, Member};
+use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ImplItemFn, ItemFn, Member};
 
 // ============================================================================
 // Unbounded Channel Detection
@@ -54,6 +55,7 @@ impl Rule for UnboundedChannelRule {
             ctx,
             diagnostics: Vec::new(),
             state: VisitorState::new(),
+            imports: ImportOracle::from_file(ctx.ast),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -64,6 +66,7 @@ struct UnboundedChannelVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     state: VisitorState,
+    imports: ImportOracle,
 }
 
 /// Unbounded channel patterns and their bounded alternatives
@@ -212,6 +215,13 @@ impl UnboundedChannelVisitor<'_> {
         path_str: &str,
         span: proc_macro2::Span,
     ) {
+        // A locally-defined item shadows the outer name: a user `fn
+        // unbounded_channel` / `mod flume` is not the runtime primitive.
+        let leading = path_str.split("::").next().unwrap_or(path_str);
+        if self.imports.is_local_item(leading) {
+            return;
+        }
+
         // Special case: std::sync::mpsc::channel is unbounded, but tokio::sync::mpsc::channel is bounded
         // We need to detect std's channel without flagging tokio's
         for &pattern in STD_MPSC_CHANNEL_PATTERNS {
@@ -598,6 +608,7 @@ impl Rule for AsyncBlockInAsyncRule {
             diagnostics: Vec::new(),
             in_async_fn: false,
             state: VisitorState::new(),
+            imports: ImportOracle::from_file(ctx.ast),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -609,6 +620,17 @@ struct AsyncBlockingVisitor<'a> {
     diagnostics: Vec<Diagnostic>,
     in_async_fn: bool,
     state: VisitorState,
+    imports: ImportOracle,
+}
+
+/// If `path` contains a segment equal to `type_leaf`, return the leading
+/// segments up to and including it as owned strings, e.g. path
+/// `tokio::process::Command::new` with leaf `Command` -> `["tokio", "process",
+/// "Command"]`. Returns `None` if the leaf is absent.
+fn path_segments_up_to(path: &syn::Path, type_leaf: &str) -> Option<Vec<String>> {
+    let idents: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let pos = idents.iter().position(|s| s == type_leaf)?;
+    Some(idents[..=pos].to_vec())
 }
 
 /// Known blocking calls that should be avoided in async contexts
@@ -674,55 +696,173 @@ const BLOCKING_CALLS: &[(&str, &str, &str)] = &[
 ];
 
 impl AsyncBlockingVisitor<'_> {
-    fn check_blocking_call_with_fix(
+    /// Last `::`-separated segment of a module path,
+    /// e.g. `"std::process::Command"` -> `"Command"`, `"std::fs"` -> `"fs"`.
+    fn module_leaf(module_path: &str) -> &str {
+        module_path.rsplit("::").next().unwrap_or(module_path)
+    }
+
+    /// True if `full_path` ends with `needle` on a `::` (or start-of-string)
+    /// boundary, so `"std::fs::read"` matches `"fs::read"` but `"my_fs::read"`
+    /// does not match `"fs::read"`.
+    fn path_ends_with_boundary(full_path: &str, needle: &str) -> bool {
+        if !full_path.ends_with(needle) {
+            return false;
+        }
+        let prefix_len = full_path.len() - needle.len();
+        prefix_len == 0 || full_path[..prefix_len].ends_with("::")
+    }
+
+    /// If the receiver chain of a method call syntactically mentions `type_leaf`
+    /// as a path segment, return the path segments *up to and including* that
+    /// leaf, e.g. `tokio::process::Command::new("ls")` with leaf `Command`
+    /// yields `["tokio", "process", "Command"]` and a bare `Command::new(..)`
+    /// yields `["Command"]`. Returning the qualifier (rather than a bare bool)
+    /// lets the caller canonicalize it through the import oracle and decide
+    /// whether it is really the std type — so `.output()` fires on a genuine
+    /// `std::process::Command` but not on a user type or the tokio async form.
+    fn receiver_type_path(expr: &Expr, type_leaf: &str, depth: usize) -> Option<Vec<String>> {
+        if depth > 16 {
+            return None;
+        }
+        match expr {
+            Expr::MethodCall(m) => Self::receiver_type_path(&m.receiver, type_leaf, depth + 1),
+            Expr::Call(c) => {
+                if let Expr::Path(p) = &*c.func {
+                    if let Some(segs) = path_segments_up_to(&p.path, type_leaf) {
+                        return Some(segs);
+                    }
+                }
+                Self::receiver_type_path(&c.func, type_leaf, depth + 1)
+            }
+            Expr::Path(p) => path_segments_up_to(&p.path, type_leaf),
+            Expr::Reference(r) => Self::receiver_type_path(&r.expr, type_leaf, depth + 1),
+            Expr::Paren(p) => Self::receiver_type_path(&p.expr, type_leaf, depth + 1),
+            Expr::Field(f) => Self::receiver_type_path(&f.base, type_leaf, depth + 1),
+            Expr::Try(t) => Self::receiver_type_path(&t.expr, type_leaf, depth + 1),
+            Expr::Await(a) => Self::receiver_type_path(&a.base, type_leaf, depth + 1),
+            _ => None,
+        }
+    }
+
+    /// Path-form blocking call, e.g. `std::fs::read_to_string(..)`. Requires the
+    /// module/type qualifier to be present (`fs::read_to_string`,
+    /// `Command::output`) so that unrelated paths sharing only a trailing name —
+    /// notably `tokio::spawn` vs. `std::process::Command::spawn` — never match.
+    fn check_blocking_path_call(
         &mut self,
         full_path: &str,
         span: proc_macro2::Span,
         call_node: Option<&ExprCall>,
     ) {
-        // Find the best (most specific) match
-        let mut best_match: Option<(&str, &str, &str)> = None;
-        let mut best_match_len = 0;
+        // A locally-defined item shadows the outer name: a user `mod fs` /
+        // `mod net` / `struct Command` is not the std item, so its calls never
+        // block. This is checked before canonicalization because a local item
+        // is authoritative regardless of any same-named import.
+        let leading = full_path.split("::").next().unwrap_or(full_path);
+        if self.imports.is_local_item(leading) {
+            return;
+        }
 
+        // Rewrite the leading segment through the `use` map so aliases resolve
+        // to their canonical path: `sfs::read_to_string` -> `std::fs::…`.
+        let canon = self.imports.canonicalize(full_path);
+
+        // Never flag the async replacements themselves when written in full
+        // (or reached via an alias that canonicalizes into them).
+        if canon.starts_with("tokio::") || canon.starts_with("async_std::") {
+            return;
+        }
+
+        let mut best: Option<(&str, &str)> = None;
+        let mut best_len = 0;
         for (module_path, func_name, alternative) in BLOCKING_CALLS {
-            // Check if the path ends with the function name
-            // e.g., "std::fs::read_to_string" ends with "read_to_string"
-            // or "thread::sleep" ends with "sleep"
-            if full_path.ends_with(func_name) {
-                // Verify it's a word boundary (preceded by :: or start of string)
-                let prefix_len = full_path.len().saturating_sub(func_name.len());
-                let is_boundary = prefix_len == 0 || full_path[..prefix_len].ends_with("::");
-
-                if is_boundary && func_name.len() > best_match_len {
-                    best_match = Some((module_path, func_name, alternative));
-                    best_match_len = func_name.len();
-                }
+            let leaf = Self::module_leaf(module_path);
+            let needle = format!("{leaf}::{func_name}");
+            if Self::path_ends_with_boundary(&canon, &needle) && needle.len() > best_len {
+                best = Some((func_name, alternative));
+                best_len = needle.len();
             }
         }
 
-        if let Some((_module_path, func_name, alternative)) = best_match {
-            let line = span.start().line;
-            let column = span.start().column;
-
-            // Try to generate a fix for function calls (not method calls)
+        if let Some((func_name, alternative)) = best {
             let fix = call_node.and_then(|node| self.generate_blocking_fix(node, alternative));
-
-            self.diagnostics.push(Diagnostic {
-                rule_id: "async-block-in-async",
-                severity: Severity::Error,
-                message: format!(
-                    "Blocking call `{}` inside async function. Use `{}.await` instead.",
-                    func_name, alternative
-                ),
-                file_path: self.ctx.file_path.to_path_buf(),
-                line,
-                column,
-                end_line: None,
-                end_column: None,
-                suggestion: Some(format!("Replace with `{}.await`", alternative)),
-                fix,
-            });
+            self.emit_blocking(func_name, alternative, span, fix);
         }
+    }
+
+    /// Method-form blocking call, e.g. `cmd.output()`. A bare method name is far
+    /// too ambiguous to flag on its own (`builder.output()`, `pool.connect()`,
+    /// `atomic.load()` are all common), so this only fires when the receiver
+    /// chain corroborates the std type (`Command::new(..).output()`).
+    fn check_blocking_method_call(
+        &mut self,
+        method_name: &str,
+        receiver: &Expr,
+        span: proc_macro2::Span,
+    ) {
+        let mut best: Option<(&str, &str)> = None;
+        let mut best_len = 0;
+        for (module_path, func_name, alternative) in BLOCKING_CALLS {
+            if *func_name != method_name {
+                continue;
+            }
+            let leaf = Self::module_leaf(module_path);
+            let Some(segs) = Self::receiver_type_path(receiver, leaf, 0) else {
+                continue;
+            };
+            // The receiver mentions the type name; now decide whether it is
+            // really the std type. A locally-defined item of that name shadows
+            // it (`struct Command`), an alias / import may re-root it, and the
+            // tokio/async_std forms are the recommended fix, not a defect.
+            let qualifier = segs.first().map(String::as_str).unwrap_or("");
+            if self.imports.is_local_item(qualifier) {
+                continue;
+            }
+            let canon = self.imports.canonicalize(&segs.join("::"));
+            if canon.starts_with("tokio::") || canon.starts_with("async_std::") {
+                continue;
+            }
+            // Require positive evidence that the receiver type is std-rooted:
+            // a fully-qualified `std::…::Command` or a `use` that canonicalizes
+            // into std. A bare, unqualified `Command` with no in-file evidence
+            // is left alone (precision-first — cargo-perf can't resolve it).
+            if !is_std_root(&canon) {
+                continue;
+            }
+            if func_name.len() > best_len {
+                best = Some((func_name, alternative));
+                best_len = func_name.len();
+            }
+        }
+
+        if let Some((func_name, alternative)) = best {
+            self.emit_blocking(func_name, alternative, span, None);
+        }
+    }
+
+    fn emit_blocking(
+        &mut self,
+        func_name: &str,
+        alternative: &str,
+        span: proc_macro2::Span,
+        fix: Option<Fix>,
+    ) {
+        self.diagnostics.push(Diagnostic {
+            rule_id: "async-block-in-async",
+            severity: Severity::Error,
+            message: format!(
+                "Blocking call `{}` inside async function. Use `{}.await` instead.",
+                func_name, alternative
+            ),
+            file_path: self.ctx.file_path.to_path_buf(),
+            line: span.start().line,
+            column: span.start().column,
+            end_line: None,
+            end_column: None,
+            suggestion: Some(format!("Replace with `{}.await`", alternative)),
+            fix,
+        });
     }
 
     /// Generate a fix by replacing the entire call expression with the async alternative + .await.
@@ -775,6 +915,21 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         self.state.exit_expr();
     }
 
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        if self.state.should_bail() {
+            return;
+        }
+        self.state.enter_expr();
+        // Async methods in impl blocks (inherent and trait impls) are async
+        // functions too; without tracking their asyncness, blocking calls in their
+        // bodies were systematically missed (D3, D4).
+        let was_async = self.in_async_fn;
+        self.in_async_fn = node.sig.asyncness.is_some();
+        syn::visit::visit_impl_item_fn(self, node);
+        self.in_async_fn = was_async;
+        self.state.exit_expr();
+    }
+
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
         if self.state.should_bail() {
             return;
@@ -782,6 +937,33 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         self.state.enter_expr();
         syn::visit::visit_expr(self, node);
         self.state.exit_expr();
+    }
+
+    fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
+        // An `async { .. }` block is an async context on its own, independent of
+        // the enclosing function. A blocking call inside
+        // `tokio::spawn(async { std::fs::read(..) })` written in a *sync* fn still
+        // blocks the runtime worker that polls it, so track it (D5). Reached only
+        // via `visit_expr`, which already manages recursion depth.
+        let was_async = self.in_async_fn;
+        self.in_async_fn = true;
+        syn::visit::visit_expr_async(self, node);
+        self.in_async_fn = was_async;
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        // A closure body is a fresh execution context. Sync closures are routinely
+        // handed to offloaders (`spawn_blocking`, `thread::spawn`, rayon) where
+        // blocking is the *correct* thing to do, so a sync closure body is NOT an
+        // async context — even inside an async fn — or every offloaded blocking
+        // call is a false positive (D5). An `async` closure keeps async context; a
+        // nested `async { .. }` re-enables it via `visit_expr_async`. A blocking
+        // call in a sync closure that is instead invoked inline is a deliberate
+        // known gap: the offload false positive is far more common than that miss.
+        let was_async = self.in_async_fn;
+        self.in_async_fn = node.asyncness.is_some();
+        syn::visit::visit_expr_closure(self, node);
+        self.in_async_fn = was_async;
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
@@ -800,7 +982,7 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
                     .map(|s| s.ident.span())
                     .unwrap_or_else(proc_macro2::Span::call_site);
                 // Pass the full call node for fix generation (to include args and add .await)
-                self.check_blocking_call_with_fix(&path_str, display_span, Some(node));
+                self.check_blocking_path_call(&path_str, display_span, Some(node));
             }
         }
         syn::visit::visit_expr_call(self, node);
@@ -809,8 +991,9 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if self.in_async_fn {
             let method_name = node.method.to_string();
-            // Method calls can't be easily auto-fixed (would need to change receiver too)
-            self.check_blocking_call_with_fix(&method_name, node.method.span(), None);
+            // Method calls only fire when the receiver chain corroborates the
+            // std type; a bare method name is too ambiguous to flag.
+            self.check_blocking_method_call(&method_name, &node.receiver, node.method.span());
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -842,6 +1025,239 @@ mod tests {
         let config = Config::default();
         let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
         UnboundedSpawnRule.check(&ctx)
+    }
+
+    // ========================================================================
+    // Async methods in impl / trait-impl blocks (D3, D4)
+    // ========================================================================
+
+    #[test]
+    fn test_blocking_call_in_inherent_impl_async_method() {
+        // D3: a blocking `std::fs::read_to_string` inside an async method of an
+        // inherent impl must fire, just as it does in a free async fn.
+        let source = r#"
+            struct Worker;
+            impl Worker {
+                async fn load(&self) -> String {
+                    std::fs::read_to_string("config.toml").unwrap()
+                }
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in an inherent-impl async method must fire: {:?}",
+            check_blocking_code(source)
+        );
+    }
+
+    #[test]
+    fn test_blocking_call_in_trait_impl_async_method() {
+        // D4: a blocking `std::process::Command::..output()` inside an async method
+        // of a trait impl must fire.
+        let source = r#"
+            trait Runner {
+                async fn go(&self);
+            }
+            struct Shell;
+            impl Runner for Shell {
+                async fn go(&self) {
+                    let _ = std::process::Command::new("ls").arg("-la").output();
+                }
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in a trait-impl async method must fire: {:?}",
+            check_blocking_code(source)
+        );
+    }
+
+    #[test]
+    fn test_blocking_call_in_sync_impl_method_is_silent() {
+        // Guard: a blocking call in a NON-async impl method must stay silent — the
+        // impl-method handling must track asyncness, not flag every impl method.
+        let source = r#"
+            struct Worker;
+            impl Worker {
+                fn load(&self) -> String {
+                    std::fs::read_to_string("config.toml").unwrap()
+                }
+            }
+        "#;
+        assert!(
+            check_blocking_code(source).is_empty(),
+            "blocking call in a sync impl method must not fire: {:?}",
+            check_blocking_code(source)
+        );
+    }
+
+    // ========================================================================
+    // Blocking-call receiver gating (false-positive guards)
+    // ========================================================================
+
+    #[test]
+    fn test_tokio_spawn_is_not_blocking() {
+        // `tokio::spawn` shares a trailing name with `Command::spawn` but must
+        // never be flagged as a blocking call.
+        let diags = check_blocking_code(r#"async fn run() { tokio::spawn(async {}); }"#);
+        assert!(diags.is_empty(), "tokio::spawn flagged: {diags:?}");
+    }
+
+    #[test]
+    fn test_custom_method_names_are_not_blocking() {
+        // `.output()`, `.connect()`, `.bind()` on arbitrary receivers are common
+        // and must not match std::process / std::net blocking calls.
+        let diags = check_blocking_code(
+            r#"
+            async fn run() {
+                let _ = Builder.output();
+                let _ = pool().connect().await;
+                let _ = q().bind(5);
+            }
+            struct Builder;
+            impl Builder { fn output(&self) -> u8 { 0 } }
+            "#,
+        );
+        assert!(diags.is_empty(), "custom methods flagged: {diags:?}");
+    }
+
+    #[test]
+    fn test_real_command_output_is_blocking() {
+        // The receiver chain `Command::new(..).output()` corroborates the std
+        // type, so the true positive must survive gating.
+        let diags = check_blocking_code(
+            r#"async fn run() { let _ = std::process::Command::new("ls").output(); }"#,
+        );
+        assert_eq!(diags.len(), 1, "expected one blocking finding: {diags:?}");
+        assert_eq!(diags[0].rule_id, "async-block-in-async");
+    }
+
+    #[test]
+    fn test_path_form_std_fs_still_blocks() {
+        let diags =
+            check_blocking_code(r#"async fn run() { let _ = std::fs::read_to_string("x"); }"#);
+        assert_eq!(
+            diags.len(),
+            1,
+            "std::fs::read_to_string must still flag: {diags:?}"
+        );
+    }
+
+    // ========================================================================
+    // Import/shadow oracle gating (D1, D2, D6, D7, D8)
+    // ========================================================================
+
+    #[test]
+    fn test_user_struct_named_command_not_blocking() {
+        // D1: a locally-defined `struct Command` with an `.output()` method is
+        // NOT std::process::Command; the receiver `Command::new(..)` mentions
+        // "Command" but the item is shadowed in-file.
+        let diags = check_blocking_code(
+            r#"
+            struct Command { label: String }
+            impl Command {
+                fn new(label: &str) -> Self { Command { label: label.to_string() } }
+                fn output(&self) -> String { self.label.clone() }
+            }
+            async fn run() -> String { Command::new("x").output() }
+            "#,
+        );
+        assert!(diags.is_empty(), "user struct Command flagged: {diags:?}");
+    }
+
+    #[test]
+    fn test_user_mod_net_tcpstream_not_blocking() {
+        // D2: a local `mod net` with its own `TcpStream::connect` is not
+        // std::net::TcpStream.
+        let diags = check_blocking_code(
+            r#"
+            mod net {
+                pub struct TcpStream;
+                impl TcpStream { pub fn connect(_a: &str) -> Self { TcpStream } }
+            }
+            async fn run() { let _ = net::TcpStream::connect("127.0.0.1:8080"); }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "user mod net::TcpStream flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn test_user_mod_fs_read_not_blocking() {
+        // D6: a local `mod fs` with a free `read` fn is not std::fs::read.
+        let diags = check_blocking_code(
+            r#"
+            mod fs { pub fn read(_p: &str) -> u8 { 0 } }
+            async fn run() { let _ = fs::read("x"); }
+            "#,
+        );
+        assert!(diags.is_empty(), "user mod fs::read flagged: {diags:?}");
+    }
+
+    #[test]
+    fn test_aliased_std_fs_still_blocks() {
+        // D7: `use std::fs as sfs;` then `sfs::read_to_string(..)` is a real
+        // blocking call and must fire.
+        let diags = check_blocking_code(
+            r#"
+            use std::fs as sfs;
+            async fn run() { let _ = sfs::read_to_string("x"); }
+            "#,
+        );
+        assert_eq!(diags.len(), 1, "aliased std::fs must flag: {diags:?}");
+    }
+
+    #[test]
+    fn test_tokio_command_output_await_not_blocking() {
+        // D8: the CORRECT async form must never be flagged — it is the fix the
+        // rule itself recommends.
+        let diags = check_blocking_code(
+            r#"
+            async fn run() -> std::process::Output {
+                tokio::process::Command::new("ls").output().await.unwrap()
+            }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "tokio::process::Command...output().await flagged: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn test_use_std_process_command_output_still_blocks() {
+        // Guard the other direction: `use std::process::Command;` then
+        // `Command::new(..).output()` must still fire via the use-map.
+        let diags = check_blocking_code(
+            r#"
+            use std::process::Command;
+            async fn run() { let _ = Command::new("ls").output(); }
+            "#,
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "imported std Command::output must flag: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn test_user_unbounded_channel_fn_not_flagged() {
+        // D35: a local `fn unbounded_channel` is unrelated to tokio.
+        let diags = check_channel_code(
+            r#"
+            fn unbounded_channel() -> Vec<u8> { Vec::new() }
+            fn run() { let _q = unbounded_channel(); }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "user unbounded_channel fn flagged: {diags:?}"
+        );
     }
 
     // ========================================================================
@@ -1284,5 +1700,84 @@ mod tests {
             "Fix should remove std sleep: {}",
             result
         );
+    }
+
+    // ========================================================================
+    // Batch 9 (D5): async blocks vs sync closures
+    // ========================================================================
+
+    #[test]
+    fn test_blocking_in_async_block_in_sync_fn_flagged() {
+        // D5: a blocking call inside an `async { .. }` block blocks the runtime
+        // worker that eventually polls it, even when the *enclosing* function is
+        // sync (the block is spawned onto the runtime). The async block, not the
+        // fn signature, defines the async context.
+        let source = r#"
+            fn spawn_work() {
+                tokio::spawn(async {
+                    let _ = std::fs::read_to_string("config.toml");
+                });
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in an async block must fire even in a sync fn"
+        );
+    }
+
+    #[test]
+    fn test_blocking_in_sync_closure_in_async_fn_not_flagged() {
+        // D5: a sync closure is a new execution context, commonly handed to an
+        // offloader (`spawn_blocking`, `thread::spawn`, rayon) where blocking is
+        // correct. We must not treat a sync closure body as async, even inside an
+        // async fn — otherwise every offloaded blocking call is a false positive.
+        let source = r#"
+            async fn process() {
+                let read_it = || {
+                    let _ = std::fs::read_to_string("config.toml");
+                };
+                let _ = read_it;
+            }
+        "#;
+        assert!(
+            check_blocking_code(source).is_empty(),
+            "blocking call in a sync closure must not fire: {:?}",
+            check_blocking_code(source)
+        );
+    }
+
+    #[test]
+    fn test_blocking_in_async_block_inside_sync_closure_flagged() {
+        // The sync-closure suppression must not swallow a nested `async { .. }`:
+        // async fn (async) -> sync closure (not async) -> async block (async again).
+        // The blocking call sits in the async block, so it must fire.
+        let source = r#"
+            async fn process() {
+                let make = || async {
+                    let _ = std::fs::read_to_string("config.toml");
+                };
+                let _ = make();
+            }
+        "#;
+        assert_eq!(
+            check_blocking_code(source).len(),
+            1,
+            "blocking call in an async block nested in a sync closure must fire"
+        );
+    }
+
+    #[test]
+    fn test_blocking_in_sync_closure_in_sync_fn_not_flagged() {
+        // Regression guard: no async context anywhere -> silent.
+        let source = r#"
+            fn process() {
+                let read_it = || {
+                    let _ = std::fs::read_to_string("config.toml");
+                };
+                let _ = read_it;
+            }
+        "#;
+        assert!(check_blocking_code(source).is_empty());
     }
 }

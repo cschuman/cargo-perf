@@ -6,18 +6,28 @@
 
 Static analysis tool that identifies Rust-specific performance anti-patterns at compile time - things that runtime profilers can't catch until it's too late.
 
-## Core Differentiators
+## Relationship to clippy
 
-| Feature | Clippy | cargo-perf |
-|---------|--------|------------|
-| Async-aware analysis | No | Yes |
-| N+1 query detection | No | Yes |
-| ORM integration | No | Yes (Diesel, SQLx, SeaORM) |
-| Data flow (lock-across-await) | No | Yes |
-| Auto-fix generation | Some | Comprehensive |
-| CI/CD first | Afterthought | Native |
-| SARIF output | No | Yes |
-| Performance-only focus | Mixed | Laser-focused |
+cargo-perf is **additive to clippy, not a replacement**. Clippy is the right
+tool for general correctness and style, and it already ships a `clippy::perf`
+lint group plus a handful of async lints (e.g. `await_holding_lock`). Run both:
+clippy for breadth, cargo-perf for depth on runtime performance and async
+correctness. The table below is an honest accounting of where cargo-perf goes
+further — not a claim that clippy does nothing here.
+
+| Area | clippy | cargo-perf |
+|------|--------|------------|
+| Async runtime lints | A few (`await_holding_lock`, ...) | Broader: blocking-I/O-in-async, unbounded channels/spawns, plus lock-across-await |
+| Lock-across-await severity | `await_holding_lock` warns on **every** guard | Sync guard = deadlock **error**; async (tokio) guard = throughput **warning** |
+| N+1 query / ORM analysis | No | Yes (Diesel, SQLx, SeaORM) |
+| Allocation-in-hot-path rules | Some (`clippy::perf`) | Specialized (regex/format/clone/capacity in loops) |
+| SARIF output | Via external tool (`clippy-sarif`) | Native (`--format sarif`) |
+| Adopt-on-legacy baseline | External tooling | Built in (`cargo perf baseline`) |
+| Enforced accuracy scorecard | — | Yes (precision/recall floor in CI) |
+
+> Where cargo-perf and clippy overlap (e.g. lock-across-await vs
+> `await_holding_lock`), cargo-perf aims to be the more precise of the two — see
+> the severity split above and [`docs/accuracy.md`](docs/accuracy.md).
 
 ---
 
@@ -28,7 +38,7 @@ Static analysis tool that identifies Rust-specific performance anti-patterns at 
 | ID | Pattern | Severity |
 |----|---------|----------|
 | `async-block-in-async` | Blocking calls inside `async fn` | Error |
-| `lock-across-await` | MutexGuard held across `.await` | Error |
+| `lock-across-await` | Sync guard held across `.await` (deadlock) / async guard (throughput) | Error / Warning |
 | `n-plus-one-query` | Database query inside loop body | Error |
 | `unbounded-channel` | Unbounded channel without backpressure | Warning |
 | `clone-in-hot-loop` | `.clone()` on heap types in loops | Warning |

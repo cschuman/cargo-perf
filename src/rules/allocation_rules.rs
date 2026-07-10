@@ -3,9 +3,10 @@
 use super::visitor::VisitorState;
 use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
+use std::collections::HashSet;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, ExprPath};
+use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, FnArg, ItemFn, Local, Pat, Type};
 
 /// Detects Vec::new() followed by push in a loop without using with_capacity
 pub struct VecNoCapacityRule;
@@ -49,20 +50,46 @@ struct VecNoCapacityVisitor<'a> {
 
 impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // Check for `let x = Vec::new()` pattern
-        if let Some(init) = &node.init {
-            if is_vec_new(&init.expr) {
-                if let syn::Pat::Ident(pat_ident) = &node.pat {
-                    // Store declaration location for better diagnostic placement
-                    let span = pat_ident.ident.span();
-                    let line = span.start().line;
-                    let column = span.start().column;
-                    self.vec_vars
-                        .insert(pat_ident.ident.to_string(), (line, column));
-                }
+        // A `let` binding classifies the name: `let v = Vec::new()` tracks it, but
+        // rebinding the same name to anything else (e.g. a shadow
+        // `let v = Vec::with_capacity(n)`) must CLEAR the stale entry, or the new
+        // binding inherits the old one's "needs capacity" status and is falsely flagged.
+        if let syn::Pat::Ident(pat_ident) = &node.pat {
+            let name = pat_ident.ident.to_string();
+            if node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_vec_new(&init.expr))
+            {
+                let span = pat_ident.ident.span();
+                self.vec_vars
+                    .insert(name, (span.start().line, span.start().column));
+            } else {
+                self.vec_vars.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        // Reassignment (`v = Vec::with_capacity(n)`) is a rebind too: it replaces the
+        // backing allocation, so the prior `Vec::new()` classification no longer holds.
+        if let Expr::Path(ExprPath {
+            path, qself: None, ..
+        }) = &*node.left
+        {
+            if let Some(ident) = path.get_ident() {
+                let name = ident.to_string();
+                if is_vec_new(&node.right) {
+                    let span = ident.span();
+                    self.vec_vars
+                        .insert(name, (span.start().line, span.start().column));
+                } else {
+                    self.vec_vars.remove(&name);
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
@@ -199,20 +226,42 @@ struct HashMapNoCapacityVisitor<'a> {
 
 impl<'ast> Visit<'ast> for HashMapNoCapacityVisitor<'_> {
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // Check for `let x = HashMap::new()` pattern
-        if let Some(init) = &node.init {
-            if is_hashmap_new(&init.expr) {
-                if let syn::Pat::Ident(pat_ident) = &node.pat {
-                    // Store declaration location for better diagnostic placement
-                    let span = pat_ident.ident.span();
-                    let line = span.start().line;
-                    let column = span.start().column;
-                    self.map_vars
-                        .insert(pat_ident.ident.to_string(), (line, column));
-                }
+        // Track `let x = HashMap::new()`; a rebind to anything else clears the entry
+        // so a shadow `let x = HashMap::with_capacity(n)` is not falsely flagged.
+        if let syn::Pat::Ident(pat_ident) = &node.pat {
+            let name = pat_ident.ident.to_string();
+            if node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_hashmap_new(&init.expr))
+            {
+                let span = pat_ident.ident.span();
+                self.map_vars
+                    .insert(name, (span.start().line, span.start().column));
+            } else {
+                self.map_vars.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if let Expr::Path(ExprPath {
+            path, qself: None, ..
+        }) = &*node.left
+        {
+            if let Some(ident) = path.get_ident() {
+                let name = ident.to_string();
+                if is_hashmap_new(&node.right) {
+                    let span = ident.span();
+                    self.map_vars
+                        .insert(name, (span.start().line, span.start().column));
+                } else {
+                    self.map_vars.remove(&name);
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
@@ -349,20 +398,42 @@ struct StringNoCapacityVisitor<'a> {
 
 impl<'ast> Visit<'ast> for StringNoCapacityVisitor<'_> {
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // Check for `let x = String::new()` pattern
-        if let Some(init) = &node.init {
-            if is_string_new(&init.expr) {
-                if let syn::Pat::Ident(pat_ident) = &node.pat {
-                    // Store declaration location for better diagnostic placement
-                    let span = pat_ident.ident.span();
-                    let line = span.start().line;
-                    let column = span.start().column;
-                    self.string_vars
-                        .insert(pat_ident.ident.to_string(), (line, column));
-                }
+        // Track `let x = String::new()`; a rebind to anything else clears the entry
+        // so a shadow `let x = String::with_capacity(n)` is not falsely flagged.
+        if let syn::Pat::Ident(pat_ident) = &node.pat {
+            let name = pat_ident.ident.to_string();
+            if node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_string_new(&init.expr))
+            {
+                let span = pat_ident.ident.span();
+                self.string_vars
+                    .insert(name, (span.start().line, span.start().column));
+            } else {
+                self.string_vars.remove(&name);
             }
         }
         syn::visit::visit_local(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if let Expr::Path(ExprPath {
+            path, qself: None, ..
+        }) = &*node.left
+        {
+            if let Some(ident) = path.get_ident() {
+                let name = ident.to_string();
+                if is_string_new(&node.right) {
+                    let span = ident.span();
+                    self.string_vars
+                        .insert(name, (span.start().line, span.start().column));
+                } else {
+                    self.string_vars.remove(&name);
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
@@ -828,6 +899,7 @@ impl Rule for MutexLockInLoopRule {
             ctx,
             diagnostics: Vec::new(),
             state: VisitorState::new(),
+            lock_names: HashSet::new(),
         };
         visitor.visit_file(ctx.ast);
         visitor.diagnostics
@@ -838,9 +910,130 @@ struct MutexLockVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     state: VisitorState,
+    /// Names of bindings known to hold a `Mutex`/`RwLock` (function-scoped).
+    /// Ambiguous `.read()`/`.write()`/`.lock()` only count as lock contention on
+    /// one of these; on any other receiver they are ordinary domain methods.
+    lock_names: HashSet<String>,
+}
+
+/// True if a type mentions `Mutex` or `RwLock` anywhere (through references and
+/// generic wrappers like `Arc<Mutex<T>>`).
+fn type_mentions_lock(ty: &Type) -> bool {
+    match ty {
+        Type::Path(tp) => tp.path.segments.iter().any(|s| {
+            let n = s.ident.to_string();
+            n == "Mutex"
+                || n == "RwLock"
+                || matches!(&s.arguments, syn::PathArguments::AngleBracketed(a)
+                    if a.args.iter().any(|arg| matches!(arg, syn::GenericArgument::Type(t) if type_mentions_lock(t))))
+        }),
+        Type::Reference(r) => type_mentions_lock(&r.elem),
+        Type::Paren(p) => type_mentions_lock(&p.elem),
+        _ => false,
+    }
+}
+
+/// True if an expression constructs a lock, e.g. `Mutex::new(..)`,
+/// `RwLock::new(..)`, or a wrapped `Arc::new(Mutex::new(..))`.
+fn expr_is_lock_ctor(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    let Expr::Path(ExprPath { path, .. }) = &*call.func else {
+        return false;
+    };
+    let mentions_lock = path
+        .segments
+        .iter()
+        .any(|s| s.ident == "Mutex" || s.ident == "RwLock");
+    let last_is_ctor = path
+        .segments
+        .last()
+        .is_some_and(|s| matches!(s.ident.to_string().as_str(), "new" | "from" | "default"));
+    if mentions_lock && last_is_ctor {
+        return true;
+    }
+    // `Arc::new(Mutex::new(..))` / `Rc::new(RwLock::new(..))`
+    let is_wrapper = path
+        .segments
+        .iter()
+        .any(|s| s.ident == "Arc" || s.ident == "Rc")
+        && path.segments.last().is_some_and(|s| s.ident == "new");
+    if is_wrapper {
+        if let Some(first) = call.args.first() {
+            return expr_is_lock_ctor(first);
+        }
+    }
+    false
+}
+
+/// The single-segment identifier of a receiver expression, if it is a bare name.
+fn mutex_simple_receiver_name(expr: &Expr) -> Option<String> {
+    if let Expr::Path(ExprPath {
+        path, qself: None, ..
+    }) = expr
+    {
+        if path.segments.len() == 1 {
+            return Some(path.segments[0].ident.to_string());
+        }
+    }
+    None
+}
+
+/// The bound identifier of a `let` pattern (`let x` / `let x: T`).
+fn mutex_binding_name(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(id) => Some(id.ident.to_string()),
+        Pat::Type(pt) => mutex_binding_name(&pt.pat),
+        _ => None,
+    }
 }
 
 impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        if self.state.should_bail() {
+            return;
+        }
+        // Scope lock bindings to this function so a name reused elsewhere with a
+        // non-lock type is not wrongly flagged.
+        let saved = std::mem::take(&mut self.lock_names);
+        for input in &node.sig.inputs {
+            if let FnArg::Typed(pt) = input {
+                if type_mentions_lock(&pt.ty) {
+                    if let Some(name) = mutex_binding_name(&pt.pat) {
+                        self.lock_names.insert(name);
+                    }
+                }
+            }
+        }
+        syn::visit::visit_item_fn(self, node);
+        self.lock_names = saved;
+    }
+
+    fn visit_local(&mut self, node: &'ast Local) {
+        // A lock ctor binding (`let g = Mutex::new(..)`) records the name; rebinding
+        // that name to a non-lock value (a shadow, or a sibling-scope reuse of the
+        // same name) must clear the stale entry so an ordinary `.read()`/`.lock()`
+        // domain method on the new binding is not mistaken for lock contention.
+        if let Some(name) = mutex_binding_name(&node.pat) {
+            // Two channels mark a local as a lock: (1) an explicit type annotation
+            // that mentions a lock (`let m: Arc<Mutex<_>> = shared.clone();`), where
+            // the initializer is not a ctor, and (2) an initializer that constructs a
+            // lock (`let m = Mutex::new(..)`). Either suffices.
+            let annotated_lock = matches!(&node.pat, Pat::Type(pt) if type_mentions_lock(&pt.ty));
+            let ctor_lock = node
+                .init
+                .as_ref()
+                .is_some_and(|init| expr_is_lock_ctor(&init.expr));
+            if annotated_lock || ctor_lock {
+                self.lock_names.insert(name);
+            } else {
+                self.lock_names.remove(&name);
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         if self.state.should_bail() {
             return;
@@ -878,9 +1071,21 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let method = node.method.to_string();
         if self.state.in_loop() {
-            let method = node.method.to_string();
-            if method == "lock" || method == "try_lock" || method == "read" || method == "write" {
+            // `lock`/`try_lock` are unambiguous lock acquisitions. `read`/`write`
+            // (and their `try_` variants) are lock acquisitions ONLY when nullary:
+            // `RwLock::read()` takes no args, whereas `io::Read::read(buf)` /
+            // `io::Write::write(buf)` take a buffer argument and must not be flagged.
+            let is_lock_acquire = matches!(method.as_str(), "lock" | "try_lock")
+                || (matches!(method.as_str(), "read" | "try_read" | "write" | "try_write")
+                    && node.args.is_empty());
+            // Only flag when the receiver is a binding known to hold a lock; a
+            // bare `.read()`/`.write()`/`.lock()` on any other value is an
+            // ordinary domain method, not lock contention.
+            let receiver_is_lock = mutex_simple_receiver_name(&node.receiver)
+                .is_some_and(|name| self.lock_names.contains(&name));
+            if is_lock_acquire && receiver_is_lock {
                 let span = node.method.span();
                 let line = span.start().line;
                 let column = span.start().column;
@@ -904,7 +1109,26 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
                 });
             }
         }
-        syn::visit::visit_expr_method_call(self, node);
+
+        // `for_each`/`try_for_each` invoke their closure once per element, so a lock
+        // acquired inside the closure body contends exactly like one inside a
+        // `for`/`while`/`loop`. Visit the receiver chain OUTSIDE loop scope — a lock
+        // on the receiver side (e.g. `m.lock().unwrap(); items.iter().for_each(..)`
+        // written inline) is acquired once, not per element — then treat the closure
+        // argument(s) as a loop body (D24). Lazy adapters (`map`, `filter`, `fold`,
+        // ...) are a deliberate known-gap: a syn-only tool cannot see whether or when
+        // they are consumed, so flagging them would risk firing on a never-run
+        // closure. Non-`for_each` calls recurse via the default walker.
+        if matches!(method.as_str(), "for_each" | "try_for_each") {
+            self.visit_expr(&node.receiver);
+            self.state.enter_loop();
+            for arg in &node.args {
+                self.visit_expr(arg);
+            }
+            self.state.exit_loop();
+        } else {
+            syn::visit::visit_expr_method_call(self, node);
+        }
     }
 }
 
@@ -955,6 +1179,185 @@ mod tests {
         let config = Config::default();
         let ctx = AnalysisContext::new(Path::new("test.rs"), source, &ast, &config);
         StringNoCapacityRule.check(&ctx)
+    }
+
+    // ========================================================================
+    // Batch 3: scope/shadow map hygiene (D25, D34, D36, D37, D38)
+    // ========================================================================
+
+    #[test]
+    fn test_vec_reassigned_to_with_capacity_not_flagged() {
+        // D36: `buf` is reassigned to `Vec::with_capacity(n)` before the loop, so
+        // every push targets the pre-sized vec. The stale `Vec::new()` binding
+        // must be cleared on reassignment.
+        let source = r#"
+            fn build(n: usize) -> Vec<u32> {
+                let mut buf = Vec::new();
+                buf = Vec::with_capacity(n);
+                for i in 0..n {
+                    buf.push(i as u32);
+                }
+                buf
+            }
+        "#;
+        assert!(
+            check_vec_capacity(source).is_empty(),
+            "reassigned-to-with_capacity vec must stay silent: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_vec_shadowed_by_with_capacity_not_flagged() {
+        // D37: the outer `v` = Vec::new() is pushed once outside any loop; a
+        // shadowed inner `v` = Vec::with_capacity is the one grown in the loop.
+        let source = r#"
+            fn render(items: &[String]) -> Vec<String> {
+                let mut v = Vec::new();
+                v.push(String::from("banner"));
+                drop(v);
+                {
+                    let mut v = Vec::with_capacity(items.len());
+                    for it in items {
+                        v.push(it.clone());
+                    }
+                    v
+                }
+            }
+        "#;
+        assert!(
+            check_vec_capacity(source).is_empty(),
+            "shadowed with_capacity vec must stay silent: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_vec_sibling_scope_name_collision_not_flagged() {
+        // D38: two same-named `out` bindings in sibling scopes; scope-1 pushes
+        // outside a loop, scope-2 uses with_capacity and grows in a loop.
+        let source = r#"
+            fn two_scopes(a: &[i32], b: &[i32]) -> (Vec<i32>, Vec<i32>) {
+                let first = {
+                    let mut out = Vec::new();
+                    out.push(a[0]);
+                    out
+                };
+                let second = {
+                    let mut out = Vec::with_capacity(b.len());
+                    for x in b {
+                        out.push(*x);
+                    }
+                    out
+                };
+                (first, second)
+            }
+        "#;
+        assert!(
+            check_vec_capacity(source).is_empty(),
+            "sibling-scope vec name collision must stay silent: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_vec_new_grown_in_loop_still_flagged() {
+        // Guard: the genuine antipattern (Vec::new grown in a loop) must still
+        // fire after the shadow/reassign hygiene changes.
+        let source = r#"
+            fn build(n: usize) -> Vec<u32> {
+                let mut buf = Vec::new();
+                for i in 0..n {
+                    buf.push(i as u32);
+                }
+                buf
+            }
+        "#;
+        assert_eq!(
+            check_vec_capacity(source).len(),
+            1,
+            "genuine Vec::new-in-loop must still fire: {:?}",
+            check_vec_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_string_shadowed_by_with_capacity_not_flagged() {
+        // D34: `line` = String::new() is immediately shadowed by
+        // `line` = String::with_capacity(1024), which is the one grown in the loop.
+        let source = r#"
+            fn build_csv(rows: &[Vec<String>]) -> String {
+                let line = String::new();
+                let _ = &line;
+                let mut line = String::with_capacity(1024);
+                for cell in rows.iter().flatten() {
+                    line.push_str(cell);
+                    line.push(',');
+                }
+                line
+            }
+        "#;
+        assert!(
+            check_string_capacity(source).is_empty(),
+            "shadowed with_capacity string must stay silent: {:?}",
+            check_string_capacity(source)
+        );
+    }
+
+    #[test]
+    fn test_mutex_sibling_scope_name_collision_not_flagged() {
+        // D25: sibling blocks both bind `g`; the first is a real Mutex locked
+        // outside a loop, the second is a non-lock `Grid` whose nullary `read()`
+        // is called in a loop. The stale lock name must clear on rebind.
+        let source = r#"
+            use std::sync::Mutex;
+            struct Grid;
+            impl Grid {
+                fn read(&self) -> i32 { 7 }
+            }
+            fn phased() -> i32 {
+                let mut out = 0;
+                {
+                    let g = Mutex::new(0i32);
+                    out += *g.lock().unwrap();
+                }
+                {
+                    let g = Grid;
+                    for _ in 0..5 {
+                        out += g.read();
+                    }
+                }
+                out
+            }
+        "#;
+        assert!(
+            check_mutex_loop(source).is_empty(),
+            "sibling-scope mutex name collision must stay silent: {:?}",
+            check_mutex_loop(source)
+        );
+    }
+
+    #[test]
+    fn test_hashmap_shadowed_by_with_capacity_not_flagged() {
+        // Same defect class as D34/D37 applied to HashMap: a shadowed
+        // `HashMap::with_capacity` binding is the one inserted-to in the loop.
+        let source = r#"
+            use std::collections::HashMap;
+            fn build(n: usize) -> HashMap<u32, u32> {
+                let map = HashMap::new();
+                let _ = &map;
+                let mut map = HashMap::with_capacity(n);
+                for i in 0..n as u32 {
+                    map.insert(i, i);
+                }
+                map
+            }
+        "#;
+        assert!(
+            check_hashmap_capacity(source).is_empty(),
+            "shadowed with_capacity hashmap must stay silent: {:?}",
+            check_hashmap_capacity(source)
+        );
     }
 
     // String capacity tests
@@ -1246,6 +1649,38 @@ mod tests {
 
     // Mutex tests
     #[test]
+    fn test_custom_nullary_read_not_flagged() {
+        // A nullary `.read()` on a non-lock type is a domain method, not a lock.
+        let source = r#"
+            struct Sensor;
+            impl Sensor { fn read(&self) -> u32 { 0 } }
+            fn poll(sensor: &Sensor) {
+                for _ in 0..10 { let _ = sensor.read(); }
+            }
+        "#;
+        assert!(
+            check_mutex_loop(source).is_empty(),
+            "custom nullary read() must not be flagged as lock contention"
+        );
+    }
+
+    #[test]
+    fn test_lock_from_local_ctor_binding_flagged() {
+        // A lock created via a local `Mutex::new(..)` binding is tracked.
+        let source = r#"
+            fn run() {
+                let m = std::sync::Mutex::new(0);
+                for _ in 0..10 { let _g = m.lock().unwrap(); }
+            }
+        "#;
+        assert_eq!(
+            check_mutex_loop(source).len(),
+            1,
+            "lock() on a tracked Mutex::new binding must be flagged"
+        );
+    }
+
+    #[test]
     fn test_mutex_lock_in_loop() {
         let source = r#"
             fn test(data: &std::sync::Mutex<Vec<i32>>) {
@@ -1275,6 +1710,110 @@ mod tests {
     }
 
     #[test]
+    fn test_type_annotated_lock_local_flagged() {
+        // D23: a local whose TYPE annotation is a lock (`m: Arc<Mutex<u64>>`) but
+        // whose initializer is `.clone()` (not a ctor) still holds a lock. Locking
+        // it every iteration is the antipattern; the local-type channel must track it.
+        let source = r#"
+            use std::sync::{Arc, Mutex};
+            fn run(shared: &Arc<Mutex<u64>>) {
+                let m: Arc<Mutex<u64>> = shared.clone();
+                let mut i = 0;
+                while i < 50 {
+                    *m.lock().unwrap() += 1;
+                    i += 1;
+                }
+            }
+        "#;
+        assert_eq!(
+            check_mutex_loop(source).len(),
+            1,
+            "type-annotated lock local must fire: {:?}",
+            check_mutex_loop(source)
+        );
+    }
+
+    #[test]
+    fn test_mutex_lock_in_for_each_closure_flagged() {
+        // D24: a Mutex locked once per element inside a `for_each` closure contends
+        // exactly like a syntactic loop, even though there is no for/while/loop.
+        let source = r#"
+            use std::sync::Mutex;
+            fn tally(counter: &Mutex<i32>, items: &[i32]) {
+                items.iter().for_each(|x| {
+                    *counter.lock().unwrap() += *x;
+                });
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "for_each lock must fire: {diagnostics:?}"
+        );
+        assert!(diagnostics[0].message.contains("lock"));
+    }
+
+    #[test]
+    fn test_mutex_lock_in_try_for_each_closure_flagged() {
+        let source = r#"
+            use std::sync::Mutex;
+            fn tally(counter: &Mutex<i32>, items: &[i32]) -> Result<(), ()> {
+                items.iter().try_for_each(|x| {
+                    *counter.lock().unwrap() += *x;
+                    Ok(())
+                })
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "try_for_each lock must fire: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_mutex_lock_in_lazy_map_not_flagged_known_gap() {
+        // Known gap (curated adapter decision): lazy adapters like `.map()` are NOT
+        // treated as loops. A syn-only tool cannot see whether or when the map is
+        // consumed, so we stay conservative and accept the miss rather than risk a
+        // false positive on a never-run closure.
+        let source = r#"
+            use std::sync::Mutex;
+            fn tally(counter: &Mutex<i32>, items: &[i32]) -> Vec<i32> {
+                items.iter().map(|x| {
+                    *counter.lock().unwrap() += *x;
+                    *x
+                }).collect()
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(
+            diagnostics.is_empty(),
+            "lazy map is a known gap: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_for_each_lock_outside_closure_not_flagged() {
+        // The receiver chain of `for_each` is visited OUTSIDE loop scope: a lock
+        // acquired on the receiver side (not per-element) is not contention.
+        let source = r#"
+            use std::sync::Mutex;
+            fn run(m: &Mutex<i32>, items: &[i32]) {
+                let _g = m.lock().unwrap();
+                items.iter().for_each(|_x| {});
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(
+            diagnostics.is_empty(),
+            "lock outside the closure must not fire: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn test_rwlock_in_loop() {
         let source = r#"
             fn test(data: &std::sync::RwLock<Vec<i32>>) {
@@ -1286,6 +1825,56 @@ mod tests {
         let diagnostics = check_mutex_loop(source);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("read"));
+    }
+
+    #[test]
+    fn test_rwlock_write_no_args_flagged() {
+        // RwLock::write() is nullary -> still a lock acquisition.
+        let source = r#"
+            fn test(data: &std::sync::RwLock<Vec<i32>>) {
+                for i in 0..10 {
+                    let mut guard = data.write().unwrap();
+                }
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_false_positive_io_write_in_loop() {
+        // io::Write::write(buf) takes an argument -> NOT a lock acquisition.
+        let source = r#"
+            use std::io::Write;
+            fn test(w: &mut Vec<u8>) {
+                for i in 0..10u8 {
+                    w.write(&[i]).unwrap();
+                }
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(
+            diagnostics.is_empty(),
+            "io::Write::write(buf) must not be flagged as lock contention"
+        );
+    }
+
+    #[test]
+    fn test_no_false_positive_io_read_in_loop() {
+        // io::Read::read(buf) takes an argument -> NOT a lock acquisition.
+        let source = r#"
+            use std::io::Read;
+            fn test<R: Read>(r: &mut R, buf: &mut [u8]) {
+                for _ in 0..10 {
+                    let _n = r.read(buf).unwrap();
+                }
+            }
+        "#;
+        let diagnostics = check_mutex_loop(source);
+        assert!(
+            diagnostics.is_empty(),
+            "io::Read::read(buf) must not be flagged as lock contention"
+        );
     }
 
     // Test for false positive prevention - custom types with .new() should NOT be flagged
