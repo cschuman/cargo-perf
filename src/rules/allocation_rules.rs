@@ -56,7 +56,11 @@ impl<'ast> Visit<'ast> for VecNoCapacityVisitor<'_> {
         // binding inherits the old one's "needs capacity" status and is falsely flagged.
         if let syn::Pat::Ident(pat_ident) = &node.pat {
             let name = pat_ident.ident.to_string();
-            if node.init.as_ref().is_some_and(|init| is_vec_new(&init.expr)) {
+            if node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_vec_new(&init.expr))
+            {
                 let span = pat_ident.ident.span();
                 self.vec_vars
                     .insert(name, (span.start().line, span.start().column));
@@ -226,7 +230,11 @@ impl<'ast> Visit<'ast> for HashMapNoCapacityVisitor<'_> {
         // so a shadow `let x = HashMap::with_capacity(n)` is not falsely flagged.
         if let syn::Pat::Ident(pat_ident) = &node.pat {
             let name = pat_ident.ident.to_string();
-            if node.init.as_ref().is_some_and(|init| is_hashmap_new(&init.expr)) {
+            if node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_hashmap_new(&init.expr))
+            {
                 let span = pat_ident.ident.span();
                 self.map_vars
                     .insert(name, (span.start().line, span.start().column));
@@ -394,7 +402,11 @@ impl<'ast> Visit<'ast> for StringNoCapacityVisitor<'_> {
         // so a shadow `let x = String::with_capacity(n)` is not falsely flagged.
         if let syn::Pat::Ident(pat_ident) = &node.pat {
             let name = pat_ident.ident.to_string();
-            if node.init.as_ref().is_some_and(|init| is_string_new(&init.expr)) {
+            if node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_string_new(&init.expr))
+            {
                 let span = pat_ident.ident.span();
                 self.string_vars
                     .insert(name, (span.start().line, span.start().column));
@@ -942,7 +954,10 @@ fn expr_is_lock_ctor(expr: &Expr) -> bool {
         return true;
     }
     // `Arc::new(Mutex::new(..))` / `Rc::new(RwLock::new(..))`
-    let is_wrapper = path.segments.iter().any(|s| s.ident == "Arc" || s.ident == "Rc")
+    let is_wrapper = path
+        .segments
+        .iter()
+        .any(|s| s.ident == "Arc" || s.ident == "Rc")
         && path.segments.last().is_some_and(|s| s.ident == "new");
     if is_wrapper {
         if let Some(first) = call.args.first() {
@@ -1005,8 +1020,7 @@ impl<'ast> Visit<'ast> for MutexLockVisitor<'_> {
             // that mentions a lock (`let m: Arc<Mutex<_>> = shared.clone();`), where
             // the initializer is not a ctor, and (2) an initializer that constructs a
             // lock (`let m = Mutex::new(..)`). Either suffices.
-            let annotated_lock =
-                matches!(&node.pat, Pat::Type(pt) if type_mentions_lock(&pt.ty));
+            let annotated_lock = matches!(&node.pat, Pat::Type(pt) if type_mentions_lock(&pt.ty));
             let ctor_lock = node
                 .init
                 .as_ref()
@@ -1732,7 +1746,11 @@ mod tests {
             }
         "#;
         let diagnostics = check_mutex_loop(source);
-        assert_eq!(diagnostics.len(), 1, "for_each lock must fire: {diagnostics:?}");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "for_each lock must fire: {diagnostics:?}"
+        );
         assert!(diagnostics[0].message.contains("lock"));
     }
 
@@ -1748,7 +1766,11 @@ mod tests {
             }
         "#;
         let diagnostics = check_mutex_loop(source);
-        assert_eq!(diagnostics.len(), 1, "try_for_each lock must fire: {diagnostics:?}");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "try_for_each lock must fire: {diagnostics:?}"
+        );
     }
 
     #[test]
@@ -1767,7 +1789,10 @@ mod tests {
             }
         "#;
         let diagnostics = check_mutex_loop(source);
-        assert!(diagnostics.is_empty(), "lazy map is a known gap: {diagnostics:?}");
+        assert!(
+            diagnostics.is_empty(),
+            "lazy map is a known gap: {diagnostics:?}"
+        );
     }
 
     #[test]
@@ -1782,7 +1807,10 @@ mod tests {
             }
         "#;
         let diagnostics = check_mutex_loop(source);
-        assert!(diagnostics.is_empty(), "lock outside the closure must not fire: {diagnostics:?}");
+        assert!(
+            diagnostics.is_empty(),
+            "lock outside the closure must not fire: {diagnostics:?}"
+        );
     }
 
     #[test]

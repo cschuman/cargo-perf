@@ -73,10 +73,8 @@ impl LockAcrossAwaitVisitor<'_> {
                         // `io::Read::read(buf)` / `io::Write::write(buf)` take a
                         // buffer and are ordinary async/sync I/O, not a guard.
                         // `lock`/`try_lock` are unambiguous and stay unconditional.
-                        let is_read_write = matches!(
-                            lock_method,
-                            "read" | "try_read" | "write" | "try_write"
-                        );
+                        let is_read_write =
+                            matches!(lock_method, "read" | "try_read" | "write" | "try_write");
                         if is_read_write && !call.args.is_empty() {
                             return None;
                         }

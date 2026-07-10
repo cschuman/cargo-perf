@@ -604,7 +604,10 @@ mod tests {
                 for _ in 0..3 { let _ = r.first(); let _ = context; }
             }
         "#;
-        assert!(check_code(source).is_empty(), "context matched tx substring");
+        assert!(
+            check_code(source).is_empty(),
+            "context matched tx substring"
+        );
     }
 
     // --- N+1 corroboration FPs from the adversarial hunt (D26-D32) ---

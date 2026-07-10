@@ -99,7 +99,10 @@ impl ImportOracle {
             for field in &named.named {
                 if let Some(ident) = &field.ident {
                     let is_arc = type_mentions_arc_rc(&field.ty);
-                    let entry = self.field_is_arc_rc.entry(ident.to_string()).or_insert(true);
+                    let entry = self
+                        .field_is_arc_rc
+                        .entry(ident.to_string())
+                        .or_insert(true);
                     *entry &= is_arc;
                 }
             }
@@ -259,7 +262,10 @@ mod tests {
     #[test]
     fn simple_use_maps_leaf_to_canonical() {
         let o = oracle("use std::fs;");
-        assert_eq!(o.canonicalize("fs::read_to_string"), "std::fs::read_to_string");
+        assert_eq!(
+            o.canonicalize("fs::read_to_string"),
+            "std::fs::read_to_string"
+        );
         assert_eq!(o.origin("fs"), Origin::Std);
     }
 
@@ -365,7 +371,8 @@ mod tests {
         // `state` is Arc in one struct but a plain Vec in another: the name is
         // ambiguous, so the oracle refuses to claim it is Arc (conservative). The
         // collapse holds regardless of declaration order.
-        let o = oracle("use std::sync::Arc; struct A { state: Arc<u8> } struct B { state: Vec<u8> }");
+        let o =
+            oracle("use std::sync::Arc; struct A { state: Arc<u8> } struct B { state: Vec<u8> }");
         assert!(!o.local_field_type_mentions_arc_rc("state"));
         let o2 =
             oracle("use std::sync::Arc; struct B { state: Vec<u8> } struct A { state: Arc<u8> }");

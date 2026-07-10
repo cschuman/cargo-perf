@@ -298,7 +298,9 @@ fn every_rule_has_positive_and_negative_fixtures() {
     for rule in registry::all_rules() {
         let id = rule.id().to_string();
         if !positives.contains(&id) {
-            missing.push(format!("  {id}: no positive fixture (// perf-expect: {id})"));
+            missing.push(format!(
+                "  {id}: no positive fixture (// perf-expect: {id})"
+            ));
         }
         if !guards.contains(&id) {
             missing.push(format!("  {id}: no negative fixture (// perf-guard: {id})"));

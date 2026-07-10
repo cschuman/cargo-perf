@@ -396,9 +396,13 @@ impl<'ast> Visit<'ast> for CloneInLoopVisitor<'_> {
                 if is_ufcs_clone {
                     // Suppress refcount / no-op clones by inspecting the single
                     // argument (`Clone::clone(&x)`); an Arc/Rc or Copy `x` is cheap.
-                    let skip = node.args.first().and_then(unref_simple_name).is_some_and(|name| {
-                        self.arc_rc_names.contains(&name) || self.copy_names.contains(&name)
-                    });
+                    let skip = node
+                        .args
+                        .first()
+                        .and_then(unref_simple_name)
+                        .is_some_and(|name| {
+                            self.arc_rc_names.contains(&name) || self.copy_names.contains(&name)
+                        });
                     if !skip {
                         if let Some(seg) = path.segments.last() {
                             self.emit_clone(seg.ident.span());
@@ -496,10 +500,7 @@ impl<'ast> Visit<'ast> for RegexInLoopVisitor<'_> {
                 // is spelled exactly `Regex` (`Regex::new`, `regex::Regex::new`,
                 // `fancy_regex::Regex::new`, …), and the constructor is `new`.
                 let has_regex_segment = path.segments.iter().any(|s| s.ident == "Regex");
-                let ends_with_new = path
-                    .segments
-                    .last()
-                    .is_some_and(|s| s.ident == "new");
+                let ends_with_new = path.segments.last().is_some_and(|s| s.ident == "new");
                 // A locally-defined `struct Regex` shadows the crate type.
                 let shadowed = self.imports.is_local_item("Regex");
 

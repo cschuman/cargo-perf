@@ -1101,9 +1101,7 @@ mod tests {
     fn test_tokio_spawn_is_not_blocking() {
         // `tokio::spawn` shares a trailing name with `Command::spawn` but must
         // never be flagged as a blocking call.
-        let diags = check_blocking_code(
-            r#"async fn run() { tokio::spawn(async {}); }"#,
-        );
+        let diags = check_blocking_code(r#"async fn run() { tokio::spawn(async {}); }"#);
         assert!(diags.is_empty(), "tokio::spawn flagged: {diags:?}");
     }
 
@@ -1138,10 +1136,13 @@ mod tests {
 
     #[test]
     fn test_path_form_std_fs_still_blocks() {
-        let diags = check_blocking_code(
-            r#"async fn run() { let _ = std::fs::read_to_string("x"); }"#,
+        let diags =
+            check_blocking_code(r#"async fn run() { let _ = std::fs::read_to_string("x"); }"#);
+        assert_eq!(
+            diags.len(),
+            1,
+            "std::fs::read_to_string must still flag: {diags:?}"
         );
-        assert_eq!(diags.len(), 1, "std::fs::read_to_string must still flag: {diags:?}");
     }
 
     // ========================================================================
@@ -1179,7 +1180,10 @@ mod tests {
             async fn run() { let _ = net::TcpStream::connect("127.0.0.1:8080"); }
             "#,
         );
-        assert!(diags.is_empty(), "user mod net::TcpStream flagged: {diags:?}");
+        assert!(
+            diags.is_empty(),
+            "user mod net::TcpStream flagged: {diags:?}"
+        );
     }
 
     #[test]
@@ -1234,7 +1238,11 @@ mod tests {
             async fn run() { let _ = Command::new("ls").output(); }
             "#,
         );
-        assert_eq!(diags.len(), 1, "imported std Command::output must flag: {diags:?}");
+        assert_eq!(
+            diags.len(),
+            1,
+            "imported std Command::output must flag: {diags:?}"
+        );
     }
 
     #[test]
@@ -1246,7 +1254,10 @@ mod tests {
             fn run() { let _q = unbounded_channel(); }
             "#,
         );
-        assert!(diags.is_empty(), "user unbounded_channel fn flagged: {diags:?}");
+        assert!(
+            diags.is_empty(),
+            "user unbounded_channel fn flagged: {diags:?}"
+        );
     }
 
     // ========================================================================
