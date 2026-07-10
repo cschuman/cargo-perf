@@ -28,11 +28,28 @@ use cargo_perf::Config;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// Committed accuracy floors. These are a ratchet: raise them as the corpus
-/// stabilizes. The scorecard below reports the actual numbers, which should sit
-/// at or near 100% for this curated corpus.
-const MIN_PRECISION: f64 = 0.90;
-const MIN_RECALL: f64 = 0.90;
+/// Committed accuracy floors — a one-way ratchet, now at the ceiling.
+///
+/// After the adversarial FP/FN hunt and its 10 remediation batches, this curated
+/// corpus scores a clean 1.00 / 1.00, so the floor is set to match: on this
+/// corpus the tool must be *perfect*, and any regression — a new false positive
+/// or a lost true positive — fails CI rather than silently eroding the score.
+///
+/// Two deliberate design choices keep a 1.00 floor honest rather than brittle:
+///   * Cases the tool does not yet get right are NOT counted against the floor;
+///     they live under `tests/corpus/known_gaps/` (tracked, unscored) with an
+///     explicit promotion path. That directory — not a fractional floor — is the
+///     honest valve for "we know, and here's the shape of it."
+///   * The floor is enforced PER RULE as well as in aggregate, and every rule
+///     currently rests on a thin corpus (often a single TP), so recall is
+///     effectively quantized to {0.00, 1.00}. A fractional floor would buy no
+///     real headroom and would only mask a genuine miss; the fix for thin-rule
+///     brittleness is to GROW the corpus, never to lower the bar.
+///
+/// Raising the corpus's coverage is welcome; lowering these numbers is a
+/// regression that must be justified in review.
+const MIN_PRECISION: f64 = 1.00;
+const MIN_RECALL: f64 = 1.00;
 
 const EXPECT_MARKER: &str = "// perf-expect:";
 const GUARD_MARKER: &str = "// perf-guard:";
