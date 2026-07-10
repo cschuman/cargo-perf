@@ -37,16 +37,16 @@ Current corpus (run `cargo test --test accuracy -- --nocapture` to reproduce):
 
 ```
 cargo-perf accuracy scorecard
-  fixtures: 39   |   floors: precision >= 0.90, recall >= 0.90
+  fixtures: 80   |   floors: precision >= 1.00, recall >= 1.00
   ------------------------------------------------------------
   rule                        TP  FP  FN   prec   recall
-  async-block-in-async         2   0   0   1.00   1.00
-  clone-in-hot-loop            1   0   0   1.00   1.00
+  async-block-in-async         7   0   0   1.00   1.00
+  clone-in-hot-loop            4   0   0   1.00   1.00
   collect-then-iterate         1   0   0   1.00   1.00
   format-in-loop               1   0   0   1.00   1.00
   hashmap-no-capacity          1   0   0   1.00   1.00
-  lock-across-await            2   0   0   1.00   1.00
-  mutex-in-loop                1   0   0   1.00   1.00
+  lock-across-await            4   0   0   1.00   1.00
+  mutex-in-loop                3   0   0   1.00   1.00
   n-plus-one-query             1   0   0   1.00   1.00
   regex-in-loop                1   0   0   1.00   1.00
   string-concat-loop           1   0   0   1.00   1.00
@@ -55,15 +55,18 @@ cargo-perf accuracy scorecard
   unbounded-spawn              1   0   0   1.00   1.00
   vec-no-capacity              1   0   0   1.00   1.00
   ------------------------------------------------------------
-  OVERALL                     16   0   0   1.00   1.00
+  OVERALL                     28   0   0   1.00   1.00
 ```
 
-The floors (`MIN_PRECISION` / `MIN_RECALL` in `tests/accuracy.rs`) are a
-**ratchet**: they are committed values that CI enforces on every PR — **per
-rule, not just in aggregate**, so one rule's false positives can't hide behind
-the average — and are raised as the corpus grows and stabilizes. The scorecard
-reports the true numbers; the floor is the safety net that fails the build on a
-regression.
+The floors (`MIN_PRECISION` / `MIN_RECALL` in `tests/accuracy.rs`) are a one-way
+**ratchet**: committed values CI enforces on every PR — **per rule, not just in
+aggregate**, so one rule's false positives can't hide behind the average. After
+the adversarial hunt below and its remediation, the corpus scores a clean
+1.00 / 1.00, and the floor is now set to match: on this corpus the tool must be
+*perfect*, and a reintroduced false positive or a dropped true positive fails
+the build. The bar only moves up — lowering it is a reviewable regression, and
+the honest release valve for a case we can't yet get right is `known_gaps/`
+(below), never a fractional floor.
 
 ## Adding a case
 
@@ -76,7 +79,45 @@ regression.
    exact `(rule, line)` the tool emits, and align your markers.
 4. A case the tool does not yet handle correctly goes under
    `tests/corpus/known_gaps/` (tracked, excluded from the scored floor) so the
-   metric stays honest instead of being gamed.
+   metric stays honest instead of being gamed. Name it `gap_<what>.rs` and open
+   with a header comment stating whether it's a **precision** (false positive) or
+   **recall** (false negative) gap, which rule it concerns, the *syntactic*
+   reason the current analysis misses it, and the concrete condition under which
+   it should be promoted to a scored fixture. See the existing entries for the
+   shape. This directory is the difference between "we're honestly at 1.00 on
+   what we claim to cover" and "we buried the misses in the average."
+
+## The adversarial hunt
+
+The corpus did not appear fully formed — it was *attacked* into existence. A
+repeatable adversarial FP/FN hunt drives the tool against a large, deliberately
+tricky set of look-alikes and near-misses (user types named `Command`/`fs`;
+builder chains that resemble ORM calls; `Arc`/`Rc` clones sourced from fields,
+factories, and aliases; guards dropped before `.await`; blocking work correctly
+offloaded to `spawn_blocking`), and every claimed defect is **independently
+reproduced against the built binary** before it counts. The most recent pass
+confirmed 38 defects (27 false positives, 11 false negatives) across all rule
+families and drove a 10-batch, test-first remediation.
+
+The hunt is a *discovery* process; the scorecard above is its *permanent
+record*. The loop is deliberate and closed:
+
+1. **Hunt** — generate adversarial inputs and run them through the release
+   binary, looking for a diagnostic that shouldn't fire (FP) or a missing one
+   that should (FN).
+2. **Reproduce** — confirm the defect independently, reduced to the smallest
+   fixture that still exhibits it.
+3. **Pin it** — that fixture lands in `tests/corpus/` (with a `perf-expect` /
+   `perf-guard` marker) if the fix is in reach, or in `known_gaps/` with a
+   promotion note if it is a genuine current limitation.
+4. **Fix, test-first** — the fixture is RED, then a focused change makes it
+   GREEN, then the whole scorecard must still hold at the floor.
+
+Because step 3 makes every confirmed defect a permanent fixture, a bug found
+once can never silently return: the same input that first exposed it now runs on
+every `cargo test`, and the ratcheted floor turns any recurrence into a build
+failure. That is what "repeatable harness" means here — not a script you re-run
+and eyeball, but a discovery process whose every finding is welded into CI.
 
 ## Robustness on real code
 

@@ -106,12 +106,20 @@ bumps, `Copy` values cloned in loops, `io::Read`/`Write` and `AtomicUsize::load`
 in loops, custom `.output()`/`.load()` methods mistaken for blocking/DB calls,
 and async guards dropped before `.await`.
 
+The corpus was hardened by a repeatable **adversarial FP/FN hunt** — the last
+pass confirmed 38 defects and drove a 10-batch, test-first remediation — and the
+floor is now ratcheted to a perfect **1.00 / 1.00**: on this corpus a
+reintroduced false positive or a dropped true positive fails the build. Cases
+the tool honestly can't yet get right live in `tests/corpus/known_gaps/`
+(tracked, unscored) rather than dragging the number down quietly.
+
 ```
-OVERALL   TP: 16   FP: 0   FN: 0   precision: 1.00   recall: 1.00   (39 fixtures, 14/14 rules)
+OVERALL   TP: 28   FP: 0   FN: 0   precision: 1.00   recall: 1.00   (80 fixtures, 14/14 rules)
 ```
 
-Reproduce with `cargo test --test accuracy -- --nocapture`. Full methodology,
-plus the fuzzing and real-crate robustness scans, in [docs/accuracy.md](docs/accuracy.md).
+Reproduce with `cargo test --test accuracy -- --nocapture`. Full methodology —
+the scorecard, the adversarial hunt, the `known_gaps/` policy, and the fuzzing
+and real-crate robustness scans — in [docs/accuracy.md](docs/accuracy.md).
 
 ## CI Integration
 
