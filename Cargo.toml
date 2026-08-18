@@ -35,7 +35,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Parsing
-syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+syn = { version = "3", features = ["full", "visit", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # CLI
