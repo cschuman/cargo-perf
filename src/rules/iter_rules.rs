@@ -2,7 +2,7 @@ use super::visitor::VisitorState;
 use super::{Diagnostic, Rule, Severity};
 use crate::engine::AnalysisContext;
 use syn::visit::Visit;
-use syn::{Expr, ExprMethodCall};
+use syn::{Expr, ExprMethodCall, GenericArgument, Type};
 
 /// Detects .collect() immediately followed by iteration
 pub struct CollectThenIterateRule;
@@ -97,6 +97,28 @@ fn collect_is_iterator(collect_call: &ExprMethodCall) -> bool {
     false
 }
 
+/// Collection types whose `.iter()`/`.into_iter()` yields exactly the elements
+/// collected, in order, so the intermediate collection is pure overhead.
+const SEQUENCE_COLLECTIONS: &[&str] = &["Vec", "VecDeque"];
+
+/// True unless a turbofish names a target whose collection changes the result:
+/// `HashSet`/`BTreeSet` dedup, `BTreeMap` sorts, `HashMap` keeps the last value
+/// per key, `Result`/`Option` short-circuit. Collecting into those and iterating
+/// again is the point, not waste, so only a sequence target may fire.
+fn collect_target_is_sequence(collect_call: &ExprMethodCall) -> bool {
+    let Some(turbofish) = &collect_call.turbofish else {
+        return true;
+    };
+    match turbofish.args.first() {
+        Some(GenericArgument::Type(Type::Path(ty))) => ty
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| SEQUENCE_COLLECTIONS.contains(&seg.ident.to_string().as_str())),
+        _ => false,
+    }
+}
+
 impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
         if self.state.should_bail() {
@@ -118,7 +140,10 @@ impl<'ast> Visit<'ast> for CollectThenIterateVisitor<'_> {
                 // (turbofish or an upstream iterator adapter). A domain method
                 // named `collect` on a non-iterator — e.g. `QueryBuilder::collect`
                 // returning a struct with its own `.iter()` — must stay silent (D18).
-                if inner.method == "collect" && collect_is_iterator(inner) {
+                if inner.method == "collect"
+                    && collect_is_iterator(inner)
+                    && collect_target_is_sequence(inner)
+                {
                     let span = node.method.span();
                     let line = span.start().line;
                     let column = span.start().column;
@@ -326,5 +351,27 @@ mod tests {
         "#;
         let diagnostics = check_code(source);
         assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_no_detection_for_semantic_collect_targets() {
+        let source = r#"
+            use std::collections::{BTreeSet, HashSet};
+            fn f(items: &[i32]) {
+                let _: Vec<i32> = items.iter().copied().collect::<HashSet<_>>().into_iter().collect();
+                let _: i32 = items.iter().copied().collect::<BTreeSet<_>>().iter().sum();
+            }
+        "#;
+        assert!(check_code(source).is_empty());
+    }
+
+    #[test]
+    fn test_detects_collect_vecdeque_then_iter() {
+        let source = r#"
+            fn f(items: &[i32]) -> i32 {
+                items.iter().copied().collect::<std::collections::VecDeque<_>>().iter().sum()
+            }
+        "#;
+        assert_eq!(check_code(source).len(), 1);
     }
 }

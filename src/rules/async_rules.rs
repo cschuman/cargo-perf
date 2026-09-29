@@ -2,8 +2,9 @@ use super::resolve::{is_std_root, ImportOracle};
 use super::visitor::VisitorState;
 use super::{Diagnostic, Fix, Replacement, Rule, Severity, MAX_FIX_TEXT_SIZE};
 use crate::engine::AnalysisContext;
+use std::collections::HashSet;
 use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ImplItemFn, ItemFn, Member};
+use syn::{Expr, ExprCall, ExprMethodCall, ExprPath, ImplItemFn, ItemFn, Member, Pat};
 
 // ============================================================================
 // Unbounded Channel Detection
@@ -607,6 +608,7 @@ impl Rule for AsyncBlockInAsyncRule {
             ctx,
             diagnostics: Vec::new(),
             in_async_fn: false,
+            thread_handles: HashSet::new(),
             state: VisitorState::new(),
             imports: ImportOracle::from_file(ctx.ast),
         };
@@ -619,6 +621,9 @@ struct AsyncBlockingVisitor<'a> {
     ctx: &'a AnalysisContext<'a>,
     diagnostics: Vec<Diagnostic>,
     in_async_fn: bool,
+    /// Locals in the current fn bound directly to `std::thread::spawn(..)`, so
+    /// a later `handle.join()` is known to be the blocking `JoinHandle::join`.
+    thread_handles: HashSet<String>,
     state: VisitorState,
     imports: ImportOracle,
 }
@@ -841,6 +846,51 @@ impl AsyncBlockingVisitor<'_> {
         }
     }
 
+    /// True if `expr` is a call that canonicalizes to `std::thread::spawn`.
+    fn is_std_thread_spawn(&self, expr: &Expr) -> bool {
+        let Expr::Call(call) = expr else {
+            return false;
+        };
+        let Expr::Path(ExprPath { path, .. }) = &*call.func else {
+            return false;
+        };
+        let path_str = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let leading = path_str.split("::").next().unwrap_or(&path_str);
+        !self.imports.is_local_item(leading)
+            && self.imports.canonicalize(&path_str) == "std::thread::spawn"
+    }
+
+    /// `std::thread::JoinHandle::join()` parks the calling thread until the
+    /// spawned thread finishes. `.join` is far too common a name to flag alone
+    /// (`Vec::join`, `Path::join`), so this requires zero arguments and a
+    /// receiver that is either the `std::thread::spawn(..)` call itself or a
+    /// local bound to one in this fn.
+    fn check_thread_join(&mut self, node: &ExprMethodCall) {
+        if node.method != "join" || !node.args.is_empty() {
+            return;
+        }
+        let is_handle = match &*node.receiver {
+            Expr::Path(p) => p
+                .path
+                .get_ident()
+                .is_some_and(|id| self.thread_handles.contains(&id.to_string())),
+            receiver => self.is_std_thread_spawn(receiver),
+        };
+        if is_handle {
+            self.emit_blocking(
+                "std::thread::JoinHandle::join",
+                "tokio::task::spawn_blocking(..)",
+                node.method.span(),
+                None,
+            );
+        }
+    }
+
     fn emit_blocking(
         &mut self,
         func_name: &str,
@@ -909,9 +959,11 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         }
         self.state.enter_expr();
         let was_async = self.in_async_fn;
+        let outer_handles = std::mem::take(&mut self.thread_handles);
         self.in_async_fn = node.sig.asyncness.is_some();
         syn::visit::visit_item_fn(self, node);
         self.in_async_fn = was_async;
+        self.thread_handles = outer_handles;
         self.state.exit_expr();
     }
 
@@ -924,9 +976,11 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         // functions too; without tracking their asyncness, blocking calls in their
         // bodies were systematically missed (D3, D4).
         let was_async = self.in_async_fn;
+        let outer_handles = std::mem::take(&mut self.thread_handles);
         self.in_async_fn = node.sig.asyncness.is_some();
         syn::visit::visit_impl_item_fn(self, node);
         self.in_async_fn = was_async;
+        self.thread_handles = outer_handles;
         self.state.exit_expr();
     }
 
@@ -966,6 +1020,26 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
         self.in_async_fn = was_async;
     }
 
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        let pat = match &node.pat {
+            Pat::Type(t) => &*t.pat,
+            pat => pat,
+        };
+        if let Pat::Ident(ident) = pat {
+            let name = ident.ident.to_string();
+            let is_spawn = node
+                .init
+                .as_ref()
+                .is_some_and(|init| self.is_std_thread_spawn(&init.expr));
+            if is_spawn {
+                self.thread_handles.insert(name);
+            } else {
+                self.thread_handles.remove(&name);
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.in_async_fn {
             // Extract the function path
@@ -994,6 +1068,7 @@ impl<'ast> Visit<'ast> for AsyncBlockingVisitor<'_> {
             // Method calls only fire when the receiver chain corroborates the
             // std type; a bare method name is too ambiguous to flag.
             self.check_blocking_method_call(&method_name, &node.receiver, node.method.span());
+            self.check_thread_join(node);
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -1776,6 +1851,38 @@ mod tests {
                     let _ = std::fs::read_to_string("config.toml");
                 };
                 let _ = read_it;
+            }
+        "#;
+        assert!(check_blocking_code(source).is_empty());
+    }
+
+    #[test]
+    fn test_thread_join_in_async_fn_flagged() {
+        let source = r#"
+            use std::thread;
+            async fn wait() {
+                let handle = thread::spawn(|| ());
+                let _ = handle.join();
+                let _ = std::thread::spawn(|| ()).join();
+            }
+        "#;
+        assert_eq!(check_blocking_code(source).len(), 2);
+    }
+
+    #[test]
+    fn test_non_thread_join_not_flagged() {
+        let source = r#"
+            async fn f(parts: &[&str], base: &std::path::Path) {
+                let _ = parts.join(",");
+                let _ = base.join("x");
+                let handle = std::thread::spawn(|| ());
+                drop(handle);
+                let handle = vec!["a"];
+                let _ = handle.join("");
+            }
+            fn g() {
+                let handle = std::thread::spawn(|| ());
+                let _ = handle.join();
             }
         "#;
         assert!(check_blocking_code(source).is_empty());
